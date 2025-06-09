@@ -9,7 +9,7 @@ import requests
 from io import BytesIO
 import gdown
 import asyncio
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, ClientSettings
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
 import av
 import threading
 import queue
@@ -217,16 +217,19 @@ input_source = st.sidebar.radio(
     ["Kamera WebRTC", "Upload Gambar", "Upload Video"]
 )
 
-# WebRTC Settings
-webrtc_client_settings = ClientSettings(
-    rtc_configuration={
-        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+# WebRTC Configuration (Updated for newer versions)
+rtc_config = RTCConfiguration({
+    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+})
+
+# Media constraints
+media_stream_constraints = {
+    "video": {
+        "width": {"min": 640, "ideal": 1280}, 
+        "height": {"min": 480, "ideal": 720}
     },
-    media_stream_constraints={
-        "video": {"width": {"min": 640, "ideal": 1280}, "height": {"min": 480, "ideal": 720}},
-        "audio": False,
-    },
-)
+    "audio": False,
+}
 
 # Tambahkan informasi deployment
 with st.sidebar.expander("ℹ️ Info Deployment"):
@@ -270,11 +273,12 @@ if input_source == "Kamera WebRTC":
         else:
             st.error("❌ Tidak tersedia")
     
-    # WebRTC Streamer
+    # WebRTC Streamer (Updated configuration)
     webrtc_ctx = webrtc_streamer(
         key="defect-detection",
         video_transformer_factory=lambda: st.session_state.webrtc_transformer,
-        client_settings=webrtc_client_settings,
+        rtc_configuration=rtc_config,
+        media_stream_constraints=media_stream_constraints,
         async_transform=True,
     )
     
