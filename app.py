@@ -1,540 +1,532 @@
 import streamlit as st
 import cv2
 import numpy as np
-import time
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
+import av
 import os
-from PIL import Image
-import tempfile
-import requests
-from io import BytesIO
 import gdown
-import asyncio
-import threading
-import queue
+import tempfile
+from pathlib import Path
+import torch
+import ultralytics
+from ultralytics import YOLO
 import logging
-import sys
+from PIL import Image
+import io
 
-# Suppress warnings and configure logging
-logging.getLogger('aioice').setLevel(logging.CRITICAL)
-logging.getLogger('aiortc').setLevel(logging.CRITICAL)
-logging.getLogger('urllib3').setLevel(logging.CRITICAL)
-logging.basicConfig(level=logging.ERROR)
+# Konfigurasi logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Check if running in cloud environment
-IS_CLOUD = os.environ.get('STREAMLIT_SHARING_MODE') or os.environ.get('STREAMLIT_CLOUD') or 'streamlit.io' in os.environ.get('HOST', '')
-
-# Try to import streamlit-webrtc with better error handling
-WEBRTC_AVAILABLE = False
-if not IS_CLOUD:  # Only try WebRTC in local environments
-    try:
-        from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration, WebRtcMode
-        import av
-        WEBRTC_AVAILABLE = True
-    except ImportError:
-        WEBRTC_AVAILABLE = False
-
-# Page configuration
+# Konfigurasi halaman
 st.set_page_config(
     page_title="Deteksi Defect Pakaian",
-    page_icon="👕",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_icon="👔",
+    layout="wide"
 )
 
-# Custom CSS for better UI
-st.markdown("""
-<style>
-    .main-header {
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-        padding: 1rem;
-        border-radius: 10px;
-        color: white;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .metric-card {
-        background: #f8f9fa;
-        padding: 1rem;
-        border-radius: 10px;
-        border-left: 4px solid #667eea;
-    }
-    .status-success { color: #28a745; font-weight: bold; }
-    .status-error { color: #dc3545; font-weight: bold; }
-    .status-warning { color: #ffc107; font-weight: bold; }
-</style>
-""", unsafe_allow_html=True)
-
-# Main header
-st.markdown("""
-<div class="main-header">
-    <h1>👕 Deteksi Defect Pakaian dengan YOLOv11</h1>
-    <p>Aplikasi AI untuk mendeteksi cacat pada pakaian secara otomatis</p>
-</div>
-""", unsafe_allow_html=True)
-
-# Model download and loading functions
-@st.cache_resource(show_spinner=False)
-def download_model():
-    """Download model dari Google Drive atau URL eksternal"""
-    model_url = os.getenv('MODEL_URL')
-    model_path = "best.pt"
+class YOLOv11DefectDetector(VideoTransformerBase):
+    def __init__(self):
+        self.model = None
+        self.confidence_threshold = 0.5
+        self.load_model()
     
-    if model_url:
+    def load_model(self):
+        """Load YOLOv11 model dari Google Drive atau lokal"""
         try:
-            with st.spinner("🔄 Mengunduh model AI..."):
+            model_path = self.get_model_path()
+            if model_path and os.path.exists(model_path):
+                self.model = YOLO(model_path)
+                logger.info(f"Model berhasil dimuat dari: {model_path}")
+            else:
+                # Fallback ke model default YOLOv11
+                self.model = YOLO('yolo11n.pt')
+                logger.warning("Menggunakan model YOLOv11 default")
+        except Exception as e:
+            logger.error(f"Error loading model: {e}")
+            self.model = None
+    
+    def get_model_path(self):
+        """Download model dari Google Drive jika diperlukan"""
+        try:
+            # Cek environment variable untuk URL model
+            model_url = os.getenv('MODEL_URL')
+            
+            if model_url:
+                # Konversi Google Drive sharing URL ke direct download URL
                 if 'drive.google.com' in model_url:
                     file_id = model_url.split('/d/')[1].split('/')[0]
-                    gdown.download(f'https://drive.google.com/uc?id={file_id}', model_path, quiet=True)
+                    download_url = f'https://drive.google.com/uc?id={file_id}'
                 else:
-                    response = requests.get(model_url, timeout=30)
-                    response.raise_for_status()
-                    with open(model_path, 'wb') as f:
-                        f.write(response.content)
+                    download_url = model_url
+                
+                # Path untuk menyimpan model
+                model_path = "yolov11_defect_model.pt"
+                
+                # Download jika belum ada
+                if not os.path.exists(model_path):
+                    with st.spinner('Mengunduh model...'):
+                        gdown.download(download_url, model_path, quiet=False)
+                        logger.info(f"Model berhasil diunduh ke: {model_path}")
+                
                 return model_path
+            else:
+                # Cek model lokal
+                local_paths = [
+                    "yolov11_defect_model.pt",
+                    "models/yolov11_defect_model.pt",
+                    "./best.pt"
+                ]
+                
+                for path in local_paths:
+                    if os.path.exists(path):
+                        return path
+                
+                return None
+                
         except Exception as e:
-            st.error(f"❌ Gagal mengunduh model: {str(e)}")
+            logger.error(f"Error downloading model: {e}")
             return None
-    else:
-        if not os.path.exists(model_path):
-            st.warning("⚠️ Model tidak ditemukan. Set MODEL_URL di environment variables atau upload file model.")
-        return model_path if os.path.exists(model_path) else None
-
-@st.cache_resource(show_spinner=False)
-def load_model():
-    """Load YOLOv11 model dengan error handling yang lebih baik"""
-    try:
-        model_path = download_model()
-        if not model_path or not os.path.exists(model_path):
-            return None
+    
+    def set_confidence_threshold(self, threshold):
+        """Set confidence threshold untuk deteksi"""
+        self.confidence_threshold = threshold
+    
+    def transform(self, frame):
+        """Transform frame untuk deteksi real-time"""
+        img = frame.to_ndarray(format="bgr24")
         
+        if self.model is None:
+            # Tampilkan pesan error di frame
+            cv2.putText(img, "Model tidak tersedia", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            return img
+        
+        return self.detect_and_draw(img)
+    
+    def detect_and_draw(self, img):
+        """Fungsi deteksi dan draw bounding box yang dapat digunakan untuk video dan gambar"""
         try:
-            from ultralytics import YOLO
-            model = YOLO(model_path)
-            # Test model dengan dummy image untuk memastikan model loaded
-            dummy_img = np.zeros((640, 640, 3), dtype=np.uint8)
-            _ = model(dummy_img, verbose=False)
-            return model
-        except ImportError:
-            st.error("❌ Ultralytics tidak terinstall. Jalankan: `pip install ultralytics`")
-            return None
+            # Prediksi menggunakan YOLOv11
+            results = self.model(img, conf=self.confidence_threshold, verbose=False)
+            
+            # Debug: tampilkan info deteksi
+            detection_count = 0
+            
+            # Draw bounding boxes dan labels
+            for result in results:
+                boxes = result.boxes
+                if boxes is not None and len(boxes) > 0:
+                    detection_count = len(boxes)
+                    
+                    for i, box in enumerate(boxes):
+                        try:
+                            # Koordinat bounding box - pastikan dalam format yang benar
+                            coords = box.xyxy[0].cpu().numpy()
+                            x1, y1, x2, y2 = coords.astype(int)
+                            
+                            # Pastikan koordinat valid
+                            h, w = img.shape[:2]
+                            x1 = max(0, min(x1, w-1))
+                            y1 = max(0, min(y1, h-1))
+                            x2 = max(x1+1, min(x2, w))
+                            y2 = max(y1+1, min(y2, h))
+                            
+                            # Confidence score
+                            conf = float(box.conf[0].cpu().numpy())
+                            
+                            # Class name
+                            cls = int(box.cls[0].cpu().numpy())
+                            class_name = self.model.names.get(cls, f"Class_{cls}")
+                            
+                            # Warna berdasarkan jenis defect
+                            color = self.get_defect_color(class_name)
+                            
+                            # Draw bounding box dengan thickness yang lebih tebal
+                            cv2.rectangle(img, (x1, y1), (x2, y2), color, 3)
+                            
+                            # Label dengan confidence
+                            label = f"{class_name}: {conf:.3f}"
+                            
+                            # Setup text
+                            font = cv2.FONT_HERSHEY_SIMPLEX
+                            font_scale = 0.7
+                            thickness = 2
+                            (text_width, text_height), baseline = cv2.getTextSize(
+                                label, font, font_scale, thickness
+                            )
+                            
+                            # Background untuk label
+                            label_y = y1 - 10 if y1 - 10 > text_height else y1 + text_height + 10
+                            cv2.rectangle(
+                                img, 
+                                (x1, label_y - text_height - 5), 
+                                (x1 + text_width, label_y + 5), 
+                                color, 
+                                -1
+                            )
+                            
+                            # Text label
+                            cv2.putText(
+                                img, label, (x1, label_y), 
+                                font, font_scale, (255, 255, 255), thickness
+                            )
+                            
+                        except Exception as box_error:
+                            logger.error(f"Error processing box {i}: {box_error}")
+                            continue
+            
+            # Tampilkan info deteksi di pojok kiri atas
+            info_text = f"Detections: {detection_count} | Conf: {self.confidence_threshold:.2f}"
+            cv2.putText(img, info_text, (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            
+            # Tampilkan status model
+            model_status = "Custom Model" if os.getenv('MODEL_URL') else "Default YOLOv11"
+            cv2.putText(img, f"Model: {model_status}", (10, 60), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
         except Exception as e:
-            st.error(f"❌ Error loading model: {str(e)}")
-            return None
+            logger.error(f"Error dalam deteksi: {e}")
+            cv2.putText(img, f"Detection Error: {str(e)[:50]}", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        
+        return img
+    
+    def get_defect_color(self, class_name):
+        """Mendapatkan warna berdasarkan jenis defect"""
+        color_map = {
+            'stain': (0, 0, 255),      # Merah untuk noda
+            'hole': (255, 0, 0),       # Biru untuk lubang
+            'tear': (0, 255, 255),     # Kuning untuk robek
+            'fade': (255, 0, 255),     # Magenta untuk pudar
+            'wrinkle': (0, 255, 0),    # Hijau untuk kerut
+            'default': (255, 255, 0)   # Cyan untuk lainnya
+        }
+        
+        return color_map.get(class_name.lower(), color_map['default'])
+
+def detect_image_defects(image, model, confidence_threshold=0.5):
+    """Fungsi untuk deteksi defect pada gambar statis"""
+    if model is None:
+        return None, "Model tidak tersedia"
+    
+    try:
+        # Convert PIL Image to numpy array
+        if isinstance(image, Image.Image):
+            img_array = np.array(image)
+            if img_array.shape[2] == 4:  # RGBA
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
+        else:
+            img_array = image
+        
+        # Prediksi
+        results = model(img_array, conf=confidence_threshold, verbose=False)
+        
+        # Convert ke BGR untuk OpenCV
+        img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        
+        detection_results = []
+        
+        # Draw bounding boxes
+        for result in results:
+            boxes = result.boxes
+            if boxes is not None and len(boxes) > 0:
+                for box in boxes:
+                    # Koordinat bounding box
+                    coords = box.xyxy[0].cpu().numpy()
+                    x1, y1, x2, y2 = coords.astype(int)
+                    
+                    # Confidence score
+                    conf = float(box.conf[0].cpu().numpy())
+                    
+                    # Class name
+                    cls = int(box.cls[0].cpu().numpy())
+                    class_name = model.names.get(cls, f"Class_{cls}")
+                    
+                    # Simpan hasil deteksi
+                    detection_results.append({
+                        'class': class_name,
+                        'confidence': conf,
+                        'bbox': [x1, y1, x2, y2]
+                    })
+                    
+                    # Warna berdasarkan jenis defect
+                    color_map = {
+                        'stain': (0, 0, 255),      # Merah
+                        'hole': (255, 0, 0),       # Biru
+                        'tear': (0, 255, 255),     # Kuning
+                        'fade': (255, 0, 255),     # Magenta
+                        'wrinkle': (0, 255, 0),    # Hijau
+                        'default': (255, 255, 0)   # Cyan
+                    }
+                    
+                    color = color_map.get(class_name.lower(), color_map['default'])
+                    
+                    # Draw bounding box
+                    cv2.rectangle(img_bgr, (x1, y1), (x2, y2), color, 3)
+                    
+                    # Label dengan confidence
+                    label = f"{class_name}: {conf:.3f}"
+                    
+                    # Setup text
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = 0.8
+                    thickness = 2
+                    (text_width, text_height), baseline = cv2.getTextSize(
+                        label, font, font_scale, thickness
+                    )
+                    
+                    # Background untuk label
+                    label_y = y1 - 10 if y1 - 10 > text_height else y1 + text_height + 10
+                    cv2.rectangle(
+                        img_bgr, 
+                        (x1, label_y - text_height - 5), 
+                        (x1 + text_width, label_y + 5), 
+                        color, 
+                        -1
+                    )
+                    
+                    # Text label
+                    cv2.putText(
+                        img_bgr, label, (x1, label_y), 
+                        font, font_scale, (255, 255, 255), thickness
+                    )
+        
+        # Convert kembali ke RGB untuk display
+        result_image = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        
+        return result_image, detection_results
+        
+    except Exception as e:
+        logger.error(f"Error dalam deteksi gambar: {e}")
+        return None, f"Error: {str(e)}"
+
+def load_model_for_image():
+    """Load model untuk deteksi gambar"""
+    try:
+        # Cek environment variable untuk URL model
+        model_url = os.getenv('MODEL_URL')
+        
+        if model_url:
+            # Konversi Google Drive sharing URL ke direct download URL
+            if 'drive.google.com' in model_url:
+                file_id = model_url.split('/d/')[1].split('/')[0]
+                download_url = f'https://drive.google.com/uc?id={file_id}'
+            else:
+                download_url = model_url
+            
+            # Path untuk menyimpan model
+            model_path = "yolov11_defect_model.pt"
+            
+            # Download jika belum ada
+            if not os.path.exists(model_path):
+                with st.spinner('Mengunduh model...'):
+                    gdown.download(download_url, model_path, quiet=False)
+                    logger.info(f"Model berhasil diunduh ke: {model_path}")
+            
+            return YOLO(model_path)
+        else:
+            # Cek model lokal
+            local_paths = [
+                "yolov11_defect_model.pt",
+                "models/yolov11_defect_model.pt",
+                "./best.pt"
+            ]
+            
+            for path in local_paths:
+                if os.path.exists(path):
+                    return YOLO(path)
+            
+            # Fallback ke model default
+            return YOLO('yolo11n.pt')
             
     except Exception as e:
-        st.error(f"❌ Gagal memuat model: {str(e)}")
+        logger.error(f"Error loading model: {e}")
         return None
 
-def detect_defects(model, image, conf_threshold=0.5):
-    """Deteksi defect pada gambar dengan error handling yang lebih robust"""
-    if model is None:
-        return image, []
+def main():
+    st.title("🔍 Deteksi Defect Pakaian Real-time")
+    st.markdown("---")
     
-    try:
-        # Ensure image is in correct format
-        if isinstance(image, np.ndarray):
-            if image.dtype != np.uint8:
-                image = image.astype(np.uint8)
-            if len(image.shape) == 3 and image.shape[2] == 3:
-                # Convert BGR to RGB if needed
-                pass
+    # Tabs untuk berbagai mode deteksi
+    tab1, tab2 = st.tabs(["📹 Real-time Camera", "🖼️ Upload Gambar"])
+    
+    # Sidebar untuk konfigurasi
+    with st.sidebar:
+        st.header("⚙️ Konfigurasi")
         
-        results = model(image, conf=conf_threshold, verbose=False)
+        # Confidence threshold
+        confidence = st.slider(
+            "Confidence Threshold", 
+            min_value=0.01, 
+            max_value=1.0, 
+            value=0.1, 
+            step=0.01,
+            help="Ambang batas kepercayaan untuk deteksi (lebih rendah = lebih sensitif)"
+        )
         
-        # Get annotated image
-        try:
-            annotated_image = results[0].plot()
-        except:
-            # Fallback: return original image if plot fails
-            annotated_image = image.copy()
-        
-        boxes = results[0].boxes
-        names = results[0].names if hasattr(results[0], 'names') else {}
-        
-        detections = []
-        if boxes is not None and len(boxes) > 0:
-            for i in range(len(boxes)):
-                try:
-                    box = boxes.xyxy[i].cpu().numpy().tolist()
-                    conf = float(boxes.conf[i].cpu().numpy())
-                    cls_id = int(boxes.cls[i].cpu().numpy())
-                    cls_name = names.get(cls_id, f"Class_{cls_id}")
-                    
-                    detections.append({
-                        "Jenis Defect": cls_name,
-                        "Confidence": round(conf, 3),
-                        "X1": round(box[0], 1),
-                        "Y1": round(box[1], 1),
-                        "X2": round(box[2], 1),
-                        "Y2": round(box[3], 1),
-                        "Area": round((box[2] - box[0]) * (box[3] - box[1]), 1)
-                    })
-                except Exception as e:
-                    print(f"Error processing detection {i}: {e}")
-                    continue
-        
-        return annotated_image, detections
-        
-    except Exception as e:
-        st.error(f"❌ Error dalam deteksi: {str(e)}")
-        return image, []
-
-# Enhanced VideoTransformer with better error handling and thread safety
-class DefectDetectionTransformer(VideoTransformerBase):
-    def __init__(self, model=None, conf_threshold=0.5):
-        super().__init__()
-        self.model = model
-        self.conf_threshold = conf_threshold
-        self.frame_count = 0
-        self.detection_count = 0
-        self.last_detections = []
-        self.process_every_n_frames = 3  # Lebih sering process untuk responsivitas
-        self.last_processed_frame = None
-        self.processing_lock = threading.Lock()
-        
-    def transform(self, frame):
-        """Transform video frame dengan error handling yang robust"""
-        try:
-            # Convert frame to numpy array
-            img = frame.to_ndarray(format="bgr24")
-            
-            with self.processing_lock:
-                # Process detection setiap beberapa frame
-                should_process = (self.frame_count % self.process_every_n_frames == 0)
-                
-                if should_process and self.model is not None:
-                    try:
-                        # Convert BGR to RGB for YOLO
-                        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                        
-                        # Run detection
-                        _, detections = detect_defects(self.model, img_rgb, self.conf_threshold)
-                        self.last_detections = detections
-                        if detections:
-                            self.detection_count += len(detections)
-                            
-                    except Exception as e:
-                        print(f"Detection error: {e}")
-                        # Keep previous detections on error
-                        pass
-                
-                # Draw detections on current frame
-                try:
-                    for det in self.last_detections:
-                        x1, y1, x2, y2 = int(det['X1']), int(det['Y1']), int(det['X2']), int(det['Y2'])
-                        
-                        # Ensure coordinates are within image bounds
-                        h, w = img.shape[:2]
-                        x1 = max(0, min(x1, w-1))
-                        y1 = max(0, min(y1, h-1))
-                        x2 = max(0, min(x2, w-1))
-                        y2 = max(0, min(y2, h-1))
-                        
-                        # Draw bounding box
-                        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        
-                        # Draw label
-                        label = f"{det['Jenis Defect']}: {det['Confidence']:.2f}"
-                        label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
-                        
-                        # Background for label
-                        cv2.rectangle(img, (x1, y1-label_size[1]-10), (x1+label_size[0], y1), (0, 255, 0), -1)
-                        cv2.putText(img, label, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
-                        
-                except Exception as e:
-                    print(f"Drawing error: {e}")
-                
-                # Add frame info
-                try:
-                    # Status info
-                    status_text = f"Frame: {self.frame_count} | Detections: {len(self.last_detections)}"
-                    cv2.putText(img, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-                    
-                    # Model status
-                    model_status = "Model: Ready" if self.model else "Model: Not Available"
-                    cv2.putText(img, model_status, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-                    
-                except Exception as e:
-                    print(f"Text overlay error: {e}")
-                
-                self.frame_count += 1
-            
-            # Convert back to VideoFrame
-            return av.VideoFrame.from_ndarray(img, format="bgr24")
-            
-        except Exception as e:
-            print(f"Transform error: {e}")
-            # Return a black frame with error message on major failure
-            try:
-                error_img = np.zeros((480, 640, 3), dtype=np.uint8)
-                cv2.putText(error_img, f"Error: {str(e)[:30]}", (10, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                return av.VideoFrame.from_ndarray(error_img, format="bgr24")
-            except:
-                # Ultimate fallback
-                return frame
-
-# Load model with better error handling
-@st.cache_data
-def get_model_status():
-    """Get model loading status"""
-    return {"loaded": False, "error": None}
-
-# Initialize model
-model_status = get_model_status()
-
-with st.spinner("🔄 Memuat model AI..."):
-    try:
-        model = load_model()
-        if model:
-            model_status["loaded"] = True
-            st.success("✅ Model berhasil dimuat!")
+        # Model status
+        st.header("📊 Status Model")
+        model_url = os.getenv('MODEL_URL', 'Tidak ada')
+        if model_url != 'Tidak ada':
+            st.success("✅ Custom model configured")
         else:
-            model_status["error"] = "Model tidak tersedia"
-    except Exception as e:
-        model_status["error"] = str(e)
-        model = None
-
-# Sidebar
-st.sidebar.markdown("## ⚙️ Pengaturan")
-
-# Model status
-if model:
-    st.sidebar.markdown('<p class="status-success">✅ Model siap digunakan</p>', unsafe_allow_html=True)
-else:
-    st.sidebar.markdown('<p class="status-error">❌ Model tidak tersedia</p>', unsafe_allow_html=True)
-    st.sidebar.info("Upload model atau set MODEL_URL untuk menggunakan fitur deteksi.")
-
-# Settings
-confidence_threshold = st.sidebar.slider(
-    "🎯 Confidence Threshold", 
-    min_value=0.0, 
-    max_value=1.0, 
-    value=0.5, 
-    step=0.05,
-    help="Tingkat kepercayaan minimum untuk deteksi"
-)
-
-# WebRTC Settings
-if WEBRTC_AVAILABLE:
-    st.sidebar.markdown("### 📹 Pengaturan Kamera")
-    video_width = st.sidebar.selectbox("Lebar Video", [320, 640, 1280], index=1)
-    video_height = st.sidebar.selectbox("Tinggi Video", [240, 480, 720], index=1)
-    frame_rate = st.sidebar.selectbox("Frame Rate", [15, 20, 30], index=1)
-
-# Input source selection
-input_options = ["📁 Upload Gambar", "🎥 Upload Video"]
-if WEBRTC_AVAILABLE and not IS_CLOUD:
-    input_options.insert(0, "📹 Kamera Real-time")
-
-input_source = st.sidebar.radio("📥 Pilih Sumber Input", input_options)
-
-# Deployment info
-with st.sidebar.expander("ℹ️ Info Deployment"):
-    st.markdown("""
-    **Dependencies:**
-    ```bash
-    pip install streamlit opencv-python ultralytics pillow gdown
-    pip install streamlit-webrtc  # Untuk kamera real-time
-    ```
+            st.warning("⚠️ Using default YOLOv11")
+        
+        # Informasi defect yang dapat dideteksi
+        st.header("🏷️ Jenis Defect")
+        defect_info = {
+            "🔴 Noda (Stain)": "Kotoran atau bercak pada kain",
+            "🔵 Lubang (Hole)": "Bolong atau berlubang", 
+            "🟡 Robek (Tear)": "Sobek atau koyak",
+            "🟣 Pudar (Fade)": "Warna memudar atau belang",
+            "🟢 Kerut (Wrinkle)": "Kusut atau berkerut"
+        }
+        
+        for defect, desc in defect_info.items():
+            st.write(f"{defect}")
+            st.caption(desc)
     
-    **Environment Variables:**
-    - `MODEL_URL`: URL model YOLOv11 (.pt file)
-    
-    **Troubleshooting WebRTC:**
-    - Pastikan browser mendukung WebRTC
-    - Izinkan akses kamera
-    - Gunakan HTTPS untuk deployment
-    - Check firewall settings
-    """)
-
-# Debug info
-with st.sidebar.expander("🔧 Debug Info"):
-    st.write("WebRTC Available:", WEBRTC_AVAILABLE)
-    st.write("Is Cloud:", IS_CLOUD)
-    st.write("Model Loaded:", model is not None)
-    if model_status.get("error"):
-        st.error(f"Model Error: {model_status['error']}")
-
-# Main content based on input source
-if "Kamera Real-time" in input_source and WEBRTC_AVAILABLE:
-    st.header("📹 Deteksi Real-time")
-    
-    if IS_CLOUD:
-        st.error("❌ WebRTC tidak didukung di Streamlit Cloud. Gunakan upload file sebagai alternatif.")
-    else:
+    # Tab 1: Real-time Camera Detection
+    with tab1:
+        st.header("📹 Deteksi Real-time")
+        
         col1, col2 = st.columns([2, 1])
         
         with col1:
-            if model:
-                st.success("🟢 Model siap - Klik START untuk memulai deteksi")
-            else:
-                st.error("🔴 Model tidak tersedia - Upload model terlebih dahulu")
-                
-            st.info("💡 **Tips:** Pastikan pencahayaan cukup dan koneksi internet stabil")
-        
-        with col2:
-            # Real-time stats placeholder
-            stats_placeholder = st.empty()
-        
-        # WebRTC configuration dengan pengaturan yang lebih robust
-        rtc_config = RTCConfiguration({
-            "iceServers": [
-                {"urls": ["stun:stun.l.google.com:19302"]},
-                {"urls": ["stun:stun1.l.google.com:19302"]},
-                {"urls": ["stun:stun2.l.google.com:19302"]},
-            ]
-        })
-        
-        try:
-            # Create transformer instance
-            def create_transformer():
-                return DefectDetectionTransformer(model, confidence_threshold)
+            # Konfigurasi WebRTC
+            RTC_CONFIGURATION = RTCConfiguration({
+                "iceServers": [
+                    {"urls": ["stun:stun.l.google.com:19302"]},
+                    {"urls": ["stun:stun1.l.google.com:19302"]},
+                ]
+            })
             
+            # WebRTC Streamer
             webrtc_ctx = webrtc_streamer(
-                key="defect-detection-camera",
-                mode=WebRtcMode.SENDRECV,
-                video_transformer_factory=create_transformer,
-                rtc_configuration=rtc_config,
+                key="defect-detection",
+                video_transformer_factory=YOLOv11DefectDetector,
+                rtc_configuration=RTC_CONFIGURATION,
                 media_stream_constraints={
                     "video": {
-                        "width": {"ideal": video_width},
-                        "height": {"ideal": video_height},
-                        "frameRate": {"ideal": frame_rate}
+                        "width": {"min": 640, "ideal": 1280, "max": 1920},
+                        "height": {"min": 480, "ideal": 720, "max": 1080},
                     },
                     "audio": False
                 },
-                async_processing=True  # Enable async processing
+                async_processing=True,
             )
             
-            # Status display
+            # Update confidence threshold
+            if webrtc_ctx.video_transformer:
+                webrtc_ctx.video_transformer.set_confidence_threshold(confidence)
+        
+        with col2:
+            st.header("📋 Status")
+            
+            # Status connection
             if webrtc_ctx.state.playing:
-                st.success("🔴 LIVE - Deteksi aktif")
-                
-                # Show real-time stats
-                if webrtc_ctx.video_transformer:
-                    transformer = webrtc_ctx.video_transformer
-                    with stats_placeholder.container():
-                        stat_col1, stat_col2, stat_col3 = st.columns(3)
-                        with stat_col1:
-                            st.metric("Frames Processed", transformer.frame_count)
-                        with stat_col2:
-                            st.metric("Current Detections", len(transformer.last_detections))
-                        with stat_col3:
-                            st.metric("Total Detections", transformer.detection_count)
-                        
-                        # Show current detections
-                        if transformer.last_detections:
-                            st.subheader("🎯 Deteksi Saat Ini")
-                            for i, det in enumerate(transformer.last_detections):
-                                st.write(f"**{det['Jenis Defect']}** - Confidence: {det['Confidence']:.3f}")
-                
-            elif webrtc_ctx.state.signalling:
-                st.info("🔄 Menghubungkan...")
+                st.success("🟢 Kamera aktif")
+                st.info("🔍 Deteksi berjalan")
             else:
-                st.info("⏹️ Klik START untuk memulai deteksi real-time")
-                
-        except Exception as e:
-            st.error(f"❌ Error WebRTC: {str(e)}")
-            st.info("**Troubleshooting:**")
-            st.write("1. Refresh halaman")
-            st.write("2. Periksa izin kamera browser")
-            st.write("3. Pastikan tidak ada aplikasi lain yang menggunakan kamera")
-            st.write("4. Coba browser yang berbeda")
-
-elif "Upload Gambar" in input_source:
-    st.header("📁 Analisis Gambar")
+                st.warning("🟡 Kamera tidak aktif")
+                st.info("👆 Klik START untuk mulai")
+            
+            # Current settings
+            st.header("⚙️ Pengaturan Aktif")
+            st.metric("Confidence", f"{confidence:.2f}")
+            st.metric("Model Status", "Loaded" if webrtc_ctx.video_transformer else "Loading")
     
-    # File uploader
-    uploaded_file = st.file_uploader(
-        "Pilih gambar pakaian:",
-        type=["jpg", "jpeg", "png", "bmp", "tiff"],
-        help="Format yang didukung: JPG, PNG, BMP, TIFF (Max: 10MB)"
-    )
-    
-    if uploaded_file is not None:
-        # File size check
-        if uploaded_file.size > 10 * 1024 * 1024:
-            st.error("❌ File terlalu besar! Maksimal 10MB.")
-        else:
-            try:
-                # Process image
-                image = Image.open(uploaded_file)
-                if image.mode != 'RGB':
-                    image = image.convert('RGB')
+    # Tab 2: Image Upload Detection
+    with tab2:
+        st.header("🖼️ Upload dan Deteksi Gambar")
+        
+        # Upload gambar
+        uploaded_files = st.file_uploader(
+            "Pilih gambar pakaian untuk dianalisis",
+            type=['png', 'jpg', 'jpeg'],
+            accept_multiple_files=True,
+            help="Upload gambar dalam format PNG, JPG, atau JPEG"
+        )
+        
+        if uploaded_files:
+            # Load model untuk deteksi gambar
+            if 'image_model' not in st.session_state:
+                with st.spinner('Loading model untuk deteksi gambar...'):
+                    st.session_state.image_model = load_model_for_image()
+            
+            for i, uploaded_file in enumerate(uploaded_files):
+                st.markdown(f"### 📸 Gambar {i+1}: {uploaded_file.name}")
                 
-                # Resize if too large
-                max_size = 1920
-                if max(image.size) > max_size:
-                    image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                col1, col2 = st.columns(2)
                 
-                img_array = np.array(image)
+                with col1:
+                    st.subheader("🖼️ Gambar Asli")
+                    
+                    # Load dan display gambar asli
+                    image = Image.open(uploaded_file)
+                    st.image(image, caption="Gambar Original", use_column_width=True)
+                    
+                    # Info gambar
+                    st.info(f"📏 Ukuran: {image.size[0]} x {image.size[1]} pixels")
                 
-                # Display original image
-                st.subheader("📷 Gambar Input")
-                st.image(image, use_container_width=True)
-                
-                # Analyze button
-                if st.button("🔍 Analisis Defect", type="primary", use_container_width=True):
-                    if model:
-                        with st.spinner("🔄 Menganalisis gambar..."):
-                            img_with_boxes, detections = detect_defects(model, img_array, confidence_threshold)
-                            
-                            # Results
-                            st.subheader("📊 Hasil Analisis")
-                            
-                            col1, col2 = st.columns(2)
-                            
-                            with col1:
-                                st.markdown("**Gambar dengan Deteksi:**")
-                                st.image(img_with_boxes, use_container_width=True)
-                            
-                            with col2:
-                                if detections:
-                                    # Statistics
-                                    total_defects = len(detections)
-                                    avg_confidence = np.mean([d['Confidence'] for d in detections])
-                                    defect_types = len(set(d['Jenis Defect'] for d in detections))
-                                    
-                                    st.markdown("**Statistik:**")
-                                    
-                                    # Metrics
-                                    metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
-                                    with metrics_col1:
-                                        st.metric("Total Defect", total_defects, delta=None)
-                                    with metrics_col2:
-                                        st.metric("Avg Confidence", f"{avg_confidence:.3f}", delta=None)
-                                    with metrics_col3:
-                                        st.metric("Jenis Defect", defect_types, delta=None)
-                                    
-                                    # Detailed results
-                                    st.markdown("**Detail Deteksi:**")
-                                    st.dataframe(detections, use_container_width=True)
-                                    
-                                    # Severity analysis
-                                    high_conf = sum(1 for d in detections if d['Confidence'] > 0.8)
-                                    if high_conf > 0:
-                                        st.warning(f"⚠️ {high_conf} defect dengan confidence tinggi (>0.8)")
-                                    
-                                else:
-                                    st.success("✅ Tidak ada defect terdeteksi!")
-                                    st.balloons()
-                    else:
-                        st.error("❌ Model tidak tersedia untuk analisis.")
+                with col2:
+                    st.subheader("🔍 Hasil Deteksi")
+                    
+                    if st.session_state.image_model is not None:
+                        # Proses deteksi
+                        with st.spinner('Memproses deteksi...'):
+                            result_image, detection_results = detect_image_defects(
+                                image, 
+                                st.session_state.image_model, 
+                                confidence
+                            )
                         
-            except Exception as e:
-                st.error(f"❌ Error memproses gambar: {str(e)}")
+                        if result_image is not None:
+                            # Display hasil
+                            st.image(result_image, caption="Hasil Deteksi", use_column_width=True)
+                            
+                            # Summary hasil deteksi
+                            if isinstance(detection_results, list) and len(detection_results) > 0:
+                                st.success(f"✅ Ditemukan {len(detection_results)} defect:")
+                                
+                                # Tabel hasil deteksi
+                                for j, detection in enumerate(detection_results):
+                                    st.write(f"**{j+1}. {detection['class'].title()}**")
+                                    st.write(f"   - Confidence: {detection['confidence']:.3f}")
+                                    st.write(f"   - Posisi: {detection['bbox']}")
+                                
+                                # Chart statistik defect
+                                defect_counts = {}
+                                for detection in detection_results:
+                                    defect_type = detection['class']
+                                    defect_counts[defect_type] = defect_counts.get(defect_type, 0) + 1
+                                
+                                st.bar_chart(defect_counts)
+                                
+                            else:
+                                st.info("ℹ️ Tidak ada defect terdeteksi pada threshold ini")
+                                st.caption("Coba turunkan confidence threshold jika diperlukan")
+                        else:
+                            st.error(f"❌ Error: {detection_results}")
+                    else:
+                        st.error("❌ Model tidak dapat dimuat")
+                
+                st.markdown("---")
+    
+    # Footer information
+    st.markdown("---")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Model", "YOLOv11", "Custom Trained")
+    
+    with col2:
+        st.metric("Framework", "Ultralytics", "Latest")
+    
+    with col3:
+        st.metric("Deployment", "Streamlit", "WebRTC + Upload")
 
-# Video processing code remains the same as original...
-elif "Upload Video" in input_source:
-    st.header("🎥 Analisis Video")
-    st.info("📹 Fungsi analisis video sama seperti versi sebelumnya...")
-    # ... (video processing code sama seperti aslinya)
-
-# Footer
-st.markdown("---")
-st.markdown("""
-<div style="text-align: center; color: #666; font-size: 0.9em;">
-    <p>🤖 Powered by YOLOv11 | 🚀 Built with Streamlit | 📹 WebRTC Enhanced</p>
-    <p>💡 Tips: Gunakan pencahayaan yang baik dan koneksi internet stabil untuk hasil optimal</p>
-</div>
-""", unsafe_allow_html=True)
+if __name__ == "__main__":
+    main()
