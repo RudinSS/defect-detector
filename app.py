@@ -1,5 +1,5 @@
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode, RTCConfiguration
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 import cv2
 import numpy as np
 from inference import get_model
@@ -54,19 +54,6 @@ def detect_and_annotate(image, confidence_threshold=0.5):
     except Exception as e:
         st.error(f"Error during detection: {str(e)}")
         return image, None
-
-# WebRTC Video Transformer Class
-class ClothingDefectTransformer(VideoTransformerBase):
-    def __init__(self):
-        self.confidence_threshold = 0.5
-        
-    def transform(self, frame):
-        img = frame.to_ndarray(format="bgr24")
-        
-        # Run detection
-        annotated_img, _ = detect_and_annotate(img, self.confidence_threshold)
-        
-        return annotated_img
 
 # Load model
 model = load_model()
@@ -129,14 +116,14 @@ with tab1:
                 
                 with col1:
                     st.subheader("Original Image")
-                    st.image(image_rgb, caption="Original", use_column_width=True)
+                    st.image(image_rgb, caption="Original", use_container_width=True)
                 
                 with col2:
                     st.subheader("Detection Result")
                     with st.spinner("Melakukan deteksi..."):
                         annotated_image, detections = detect_and_annotate(image, confidence_threshold)
                         annotated_image_rgb = cv2.cvtColor(annotated_image, cv2.COLOR_BGR2RGB)
-                        st.image(annotated_image_rgb, caption="Detection Result", use_column_width=True)
+                        st.image(annotated_image_rgb, caption="Detection Result", use_container_width=True)
                 
                 # Show detection results
                 if detections is not None and len(detections) > 0:
@@ -184,18 +171,22 @@ with tab2:
         """)
     
     # WebRTC Streamer
+    def video_frame_callback(frame):
+        img = frame.to_ndarray(format="bgr24")
+        
+        # Run detection
+        annotated_img, _ = detect_and_annotate(img, confidence_threshold)
+        
+        return av.VideoFrame.from_ndarray(annotated_img, format="bgr24")
+    
     webrtc_ctx = webrtc_streamer(
         key="clothing-defect-detection",
         mode=WebRtcMode.SENDRECV,
         rtc_configuration=RTC_CONFIGURATION,
-        video_transformer_factory=ClothingDefectTransformer,
+        video_frame_callback=video_frame_callback,
         media_stream_constraints={"video": True, "audio": False},
         async_processing=True,
     )
-    
-    # Update confidence threshold for video transformer
-    if webrtc_ctx.video_transformer:
-        webrtc_ctx.video_transformer.confidence_threshold = confidence_threshold
 
 # Footer
 st.markdown("---")
