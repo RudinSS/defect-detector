@@ -7,3 +7,4 @@ pillow
 opencv-python-headless
 gdown
 streamlit-webrtc
+supervision
