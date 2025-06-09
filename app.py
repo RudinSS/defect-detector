@@ -8,6 +8,8 @@ import tempfile
 import requests
 from io import BytesIO
 import gdown
+import threading
+import queue
 
 # Konfigurasi halaman
 st.set_page_config(
@@ -109,6 +111,75 @@ def detect_defects(model, image, conf_threshold):
         st.error(f"Error dalam deteksi: {e}")
         return image, []
 
+# Class untuk menghandle kamera
+class CameraHandler:
+    def __init__(self):
+        self.cap = None
+        self.is_running = False
+        self.frame_queue = queue.Queue(maxsize=2)
+        self.camera_thread = None
+        
+    def start_camera(self, camera_index=0):
+        """Mulai kamera"""
+        try:
+            self.cap = cv2.VideoCapture(camera_index)
+            if not self.cap.isOpened():
+                return False
+            
+            # Set resolusi kamera
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            self.cap.set(cv2.CAP_PROP_FPS, 30)
+            
+            self.is_running = True
+            self.camera_thread = threading.Thread(target=self._capture_frames)
+            self.camera_thread.daemon = True
+            self.camera_thread.start()
+            
+            return True
+        except Exception as e:
+            st.error(f"Gagal memulai kamera: {e}")
+            return False
+    
+    def _capture_frames(self):
+        """Capture frames di thread terpisah"""
+        while self.is_running:
+            ret, frame = self.cap.read()
+            if ret:
+                # Kosongkan queue jika penuh
+                if self.frame_queue.full():
+                    try:
+                        self.frame_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                
+                # Tambahkan frame baru
+                try:
+                    self.frame_queue.put_nowait(frame)
+                except queue.Full:
+                    pass
+            else:
+                break
+    
+    def get_frame(self):
+        """Ambil frame terbaru"""
+        try:
+            return self.frame_queue.get_nowait()
+        except queue.Empty:
+            return None
+    
+    def stop_camera(self):
+        """Hentikan kamera"""
+        self.is_running = False
+        if self.camera_thread:
+            self.camera_thread.join(timeout=1)
+        if self.cap:
+            self.cap.release()
+
+# Inisialisasi camera handler
+if 'camera_handler' not in st.session_state:
+    st.session_state.camera_handler = CameraHandler()
+
 # Muat model
 model = load_model()
 
@@ -116,10 +187,10 @@ model = load_model()
 st.sidebar.title("⚙️ Pengaturan")
 confidence_threshold = st.sidebar.slider("Confidence Threshold", 0.0, 1.0, 0.5, 0.05)
 
-# Untuk deployment, hanya gunakan upload gambar dan video
+# Pilihan sumber input
 input_source = st.sidebar.radio(
     "Pilih Sumber Input", 
-    ["Upload Gambar", "Upload Video", "Demo Gambar"]
+    ["Kamera Real-time", "Upload Gambar", "Upload Video"]
 )
 
 # Tambahkan informasi deployment
@@ -128,52 +199,143 @@ with st.sidebar.expander("ℹ️ Info Deployment"):
     **Untuk deployment di Streamlit Cloud:**
     1. Upload model ke Google Drive
     2. Set MODEL_URL di secrets
-    3. Kamera tidak tersedia di cloud deployment
+    3. Kamera mungkin tidak tersedia di cloud deployment
     """)
 
-# Demo gambar untuk testing
-if input_source == "Demo Gambar":
-    st.header("🖼️ Demo dengan Gambar Contoh")
+# Kamera Real-time
+if input_source == "Kamera Real-time":
+    st.header("📹 Deteksi Real-time dengan Kamera")
     
-    # URL gambar demo (gunakan gambar dari internet)
-    demo_urls = {
-        "Contoh 1": "https://images.unsplash.com/photo-1441986300917-64674bd600d8?w=500",
-        "Contoh 2": "https://images.unsplash.com/photo-1489987707025-afc232f7ea0f?w=500",
-        "Contoh 3": "https://images.unsplash.com/photo-1562157873-818bc0726f68?w=500"
-    }
+    # Kontrol kamera
+    col1, col2, col3 = st.columns([1, 1, 2])
     
-    selected_demo = st.selectbox("Pilih gambar demo:", list(demo_urls.keys()))
+    with col1:
+        if st.button("🎥 Mulai Kamera", type="primary"):
+            if st.session_state.camera_handler.start_camera():
+                st.session_state.camera_started = True
+                st.success("Kamera dimulai!")
+            else:
+                st.error("Gagal memulai kamera. Pastikan kamera tersedia dan tidak digunakan aplikasi lain.")
     
-    try:
-        with st.spinner("Memuat gambar demo..."):
-            response = requests.get(demo_urls[selected_demo])
-            image = Image.open(BytesIO(response.content))
-            img_array = np.array(image)
+    with col2:
+        if st.button("⏹️ Hentikan Kamera"):
+            st.session_state.camera_handler.stop_camera()
+            st.session_state.camera_started = False
+            st.info("Kamera dihentikan.")
+    
+    with col3:
+        camera_index = st.selectbox("Pilih Kamera", [0, 1, 2], help="0 = Kamera default, 1 = Kamera eksternal")
+    
+    # Tambahkan pengaturan deteksi
+    col1, col2 = st.columns(2)
+    with col1:
+        detection_frequency = st.slider("Frekuensi Deteksi (detik)", 0.1, 2.0, 0.5, 0.1)
+    with col2:
+        show_fps = st.checkbox("Tampilkan FPS", True)
+    
+    # Area untuk menampilkan video
+    if 'camera_started' in st.session_state and st.session_state.camera_started:
+        # Placeholder untuk video dan hasil
+        video_placeholder = st.empty()
+        detection_placeholder = st.empty()
+        stats_placeholder = st.empty()
+        
+        # Inisialisasi variabel untuk FPS
+        fps_counter = 0
+        start_time = time.time()
+        last_detection_time = 0
+        
+        # Loop untuk menampilkan video real-time
+        while st.session_state.get('camera_started', False):
+            frame = st.session_state.camera_handler.get_frame()
             
-        if model:
-            with st.spinner('Mendeteksi defect...'):
-                img_with_boxes, detections = detect_defects(model, img_array, confidence_threshold)
+            if frame is not None:
+                # Convert BGR ke RGB untuk Streamlit
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 
-                col1, col2 = st.columns(2)
+                # Hitung FPS
+                fps_counter += 1
+                current_time = time.time()
+                elapsed_time = current_time - start_time
                 
-                with col1:
-                    st.subheader("Gambar Asli")
-                    st.image(img_array, use_container_width=True)
+                if elapsed_time >= 1.0:
+                    fps = fps_counter / elapsed_time
+                    fps_counter = 0
+                    start_time = current_time
                 
-                with col2:
-                    st.subheader("Hasil Deteksi")
-                    st.image(img_with_boxes, use_container_width=True)
-                
-                if detections:
-                    st.subheader(f"Deteksi Defect (Confidence ≥ {confidence_threshold})")
-                    st.dataframe(detections, use_container_width=True)
+                # Lakukan deteksi berdasarkan frekuensi yang ditentukan
+                if current_time - last_detection_time >= detection_frequency:
+                    if model:
+                        try:
+                            frame_with_boxes, detections = detect_defects(model, frame_rgb, confidence_threshold)
+                            last_detection_time = current_time
+                            
+                            # Tampilkan hasil deteksi
+                            with detection_placeholder.container():
+                                if detections:
+                                    st.subheader(f"🔍 Defect Terdeteksi: {len(detections)} item")
+                                    
+                                    # Buat dataframe untuk hasil deteksi
+                                    detection_df = []
+                                    for det in detections:
+                                        detection_df.append({
+                                            "Jenis": det['name'],
+                                            "Confidence": f"{det['confidence']:.3f}",
+                                            "Koordinat": f"({det['xmin']:.0f}, {det['ymin']:.0f}) - ({det['xmax']:.0f}, {det['ymax']:.0f})"
+                                        })
+                                    
+                                    st.dataframe(detection_df, use_container_width=True)
+                                else:
+                                    st.info("✅ Tidak ada defect terdeteksi")
+                            
+                            # Tampilkan frame dengan deteksi
+                            display_frame = frame_with_boxes
+                            
+                        except Exception as e:
+                            st.error(f"Error dalam deteksi: {e}")
+                            display_frame = frame_rgb
+                    else:
+                        display_frame = frame_rgb
+                        with detection_placeholder.container():
+                            st.warning("Model tidak tersedia - hanya menampilkan kamera")
                 else:
-                    st.info("Tidak ada defect yang terdeteksi.")
-        else:
-            st.image(img_array, caption="Gambar Demo (Model tidak tersedia)", use_container_width=True)
-            
-    except Exception as e:
-        st.error(f"Gagal memuat gambar demo: {e}")
+                    # Gunakan frame tanpa deteksi untuk menghemat komputasi
+                    display_frame = frame_rgb
+                
+                # Tambahkan informasi FPS ke frame jika diaktifkan
+                if show_fps and 'fps' in locals():
+                    display_frame_copy = display_frame.copy()
+                    # Tambahkan teks FPS (simulasi, karena cv2.putText tidak tersedia di Streamlit)
+                    # Kita akan menampilkan FPS di bagian terpisah
+                
+                # Tampilkan frame
+                with video_placeholder.container():
+                    st.image(display_frame, channels="RGB", use_container_width=True)
+                
+                # Tampilkan statistik
+                if show_fps and 'fps' in locals():
+                    with stats_placeholder.container():
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("FPS", f"{fps:.1f}")
+                        with col2:
+                            st.metric("Resolusi", f"{frame.shape[1]}x{frame.shape[0]}")
+                        with col3:
+                            st.metric("Status", "🟢 Aktif")
+                
+                # Delay kecil untuk mengurangi beban CPU
+                time.sleep(0.03)  # ~30 FPS
+            else:
+                time.sleep(0.1)  # Tunggu frame berikutnya
+    else:
+        st.info("👆 Klik 'Mulai Kamera' untuk memulai deteksi real-time")
+        st.write("""
+        **Catatan:**
+        - Pastikan kamera tidak digunakan oleh aplikasi lain
+        - Berikan izin akses kamera pada browser
+        - Gunakan browser modern (Chrome, Firefox, Edge)
+        - Untuk performa terbaik, gunakan kamera dengan resolusi 640x480
+        """)
 
 # Deteksi via Upload Gambar
 elif input_source == "Upload Gambar":
@@ -325,32 +487,33 @@ elif input_source == "Upload Video":
             except Exception as e:
                 st.error(f"Error memproses video: {e}")
 
-# Bersihkan file sementara
-def cleanup():
-    if 'video_path' in st.session_state and os.path.exists(st.session_state['video_path']):
-        try:
-            os.unlink(st.session_state['video_path'])
-        except:
-            pass
+# Fungsi cleanup untuk kamera
+def cleanup_camera():
+    if 'camera_handler' in st.session_state:
+        st.session_state.camera_handler.stop_camera()
 
-# Cleanup otomatis
+# Cleanup otomatis saat aplikasi ditutup
 if 'cleanup_registered' not in st.session_state:
     import atexit
-    atexit.register(cleanup)
+    atexit.register(cleanup_camera)
     st.session_state['cleanup_registered'] = True
 
 # Footer
 st.sidebar.markdown("---")
-st.sidebar.markdown("### 📋 Petunjuk Deployment")
+st.sidebar.markdown("### 📋 Petunjuk Penggunaan")
 st.sidebar.markdown("""
-1. **Upload model ke Google Drive**
-2. **Set MODEL_URL di Streamlit secrets**
-3. **Install dependencies:**
-   ```
-   pip install streamlit opencv-python ultralytics pillow gdown
-   ```
+**Kamera Real-time:**
+1. Klik 'Mulai Kamera'
+2. Berikan izin akses kamera
+3. Atur confidence threshold
+4. Lihat hasil deteksi real-time
+
+**Dependencies:**
+```
+pip install streamlit opencv-python ultralytics pillow gdown
+```
 """)
 
 st.sidebar.markdown("---")
 st.sidebar.write("© 2025 Deteksi Defect Pakaian")
-st.sidebar.write("🚀 Ready for Streamlit Cloud!")
+st.sidebar.write("📹 Dengan Kamera Real-time!")
