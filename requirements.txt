@@ -1,9 +1,7 @@
-streamlit==1.25.0
-ultralytics==8.0.20
-torch==2.0.1
-torchvision==0.15.2
-torchaudio==2.0.2
-opencv-python
-Pillow
+streamlit==1.45.0
+ultralytics>=8.3.0
+torch>=2.5.0
+torchvision
 numpy
-requests
+pillow
+opencv-python-headless
