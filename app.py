@@ -116,10 +116,10 @@ def detect_defects(model, image, conf_threshold):
 
 # Class VideoTransformer untuk WebRTC
 class DefectDetectionTransformer(VideoTransformerBase):
-    def __init__(self):
-        self.model = None
-        self.conf_threshold = 0.5
-        self.detection_frequency = 0.5  # deteksi setiap 0.5 detik
+    def __init__(self, model=None, conf_threshold=0.5, detection_frequency=0.5):
+        self.model = model
+        self.conf_threshold = conf_threshold
+        self.detection_frequency = detection_frequency  # deteksi setiap 0.5 detik
         self.last_detection_time = 0
         self.last_detections = []
         self.frame_count = 0
@@ -217,7 +217,7 @@ input_source = st.sidebar.radio(
     ["Kamera WebRTC", "Upload Gambar", "Upload Video"]
 )
 
-# WebRTC Configuration (Updated for newer versions)
+# WebRTC Configuration
 rtc_config = RTCConfiguration({
     "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
 })
@@ -249,16 +249,6 @@ with st.sidebar.expander("ℹ️ Info Deployment"):
 if input_source == "Kamera WebRTC":
     st.header("📹 Deteksi Real-time dengan WebRTC")
     
-    # Inisialisasi transformer
-    if 'webrtc_transformer' not in st.session_state:
-        st.session_state.webrtc_transformer = DefectDetectionTransformer()
-        if model:
-            st.session_state.webrtc_transformer.set_model(model)
-    
-    # Update pengaturan transformer
-    st.session_state.webrtc_transformer.set_conf_threshold(confidence_threshold)
-    st.session_state.webrtc_transformer.set_detection_frequency(detection_frequency)
-    
     # Kontrol WebRTC
     col1, col2 = st.columns([3, 1])
     
@@ -273,26 +263,44 @@ if input_source == "Kamera WebRTC":
         else:
             st.error("❌ Tidak tersedia")
     
-    # WebRTC Streamer (Updated configuration)
+    # Factory function untuk membuat transformer
+    def create_transformer():
+        return DefectDetectionTransformer(
+            model=model,
+            conf_threshold=confidence_threshold,
+            detection_frequency=detection_frequency
+        )
+    
+    # WebRTC Streamer dengan factory function yang benar
     webrtc_ctx = webrtc_streamer(
         key="defect-detection",
-        video_transformer_factory=lambda: st.session_state.webrtc_transformer,
+        video_transformer_factory=create_transformer,
         rtc_configuration=rtc_config,
         media_stream_constraints=media_stream_constraints,
         async_transform=True,
     )
     
     # Area untuk menampilkan hasil deteksi
-    if webrtc_ctx.state.playing:
+    if webrtc_ctx.state.playing and webrtc_ctx.video_transformer:
         # Placeholder untuk hasil deteksi dan statistik
         if show_stats:
             stats_placeholder = st.empty()
         detection_placeholder = st.empty()
         
-        # Loop untuk menampilkan hasil deteksi
-        while webrtc_ctx.state.playing:
-            if st.session_state.webrtc_transformer:
-                results = st.session_state.webrtc_transformer.get_detection_results()
+        # Update pengaturan transformer
+        if hasattr(webrtc_ctx.video_transformer, 'set_conf_threshold'):
+            webrtc_ctx.video_transformer.set_conf_threshold(confidence_threshold)
+            webrtc_ctx.video_transformer.set_detection_frequency(detection_frequency)
+            webrtc_ctx.video_transformer.set_model(model)
+        
+        # Timer untuk refresh display
+        if 'webrtc_last_update' not in st.session_state:
+            st.session_state.webrtc_last_update = time.time()
+        
+        # Refresh setiap 500ms
+        if time.time() - st.session_state.webrtc_last_update > 0.5:
+            if hasattr(webrtc_ctx.video_transformer, 'get_detection_results'):
+                results = webrtc_ctx.video_transformer.get_detection_results()
                 
                 if results:
                     detections = results['detections']
@@ -338,7 +346,12 @@ if input_source == "Kamera WebRTC":
                         else:
                             st.success("✅ Tidak ada defect terdeteksi")
             
-            time.sleep(0.1)  # Refresh setiap 100ms
+            st.session_state.webrtc_last_update = time.time()
+            
+        # Auto-refresh untuk update real-time
+        time.sleep(0.5)
+        st.rerun()
+            
     else:
         st.info("👆 Klik tombol 'START' untuk memulai deteksi real-time")
         st.write("""
@@ -608,6 +621,6 @@ st.sidebar.write("🌐 Powered by WebRTC!")
 # Cleanup session state jika diperlukan
 if st.sidebar.button("🔄 Reset Session"):
     for key in list(st.session_state.keys()):
-        if key.startswith(('uploaded_', 'video_', 'detect_')):
+        if key.startswith(('uploaded_', 'video_', 'detect_', 'webrtc_')):
             del st.session_state[key]
     st.rerun()
