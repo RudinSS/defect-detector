@@ -1,10 +1,9 @@
 streamlit==1.45.0
-ultralytics==8.3.85
+ultralytics==8.0.192
 torch==2.2.2
 torchvision==0.17.2
 torchaudio==2.2.2
-opencv-python==4.11.0.86
-Pillow==11.0.0
-numpy==2.1.1
-requests==2.32.3
-s
+opencv-python
+Pillow
+numpy
+requests
