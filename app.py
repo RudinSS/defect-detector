@@ -9,618 +9,556 @@ import requests
 from io import BytesIO
 import gdown
 import asyncio
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
-import av
 import threading
 import queue
+import logging
+import sys
 
-# Konfigurasi halaman
+# Suppress warnings and configure logging
+logging.getLogger('aioice').setLevel(logging.CRITICAL)
+logging.getLogger('aiortc').setLevel(logging.CRITICAL)
+logging.getLogger('urllib3').setLevel(logging.CRITICAL)
+logging.basicConfig(level=logging.ERROR)
+
+# Check if running in cloud environment
+IS_CLOUD = os.environ.get('STREAMLIT_SHARING_MODE') or os.environ.get('STREAMLIT_CLOUD') or 'streamlit.io' in os.environ.get('HOST', '')
+
+# Try to import streamlit-webrtc with better error handling
+WEBRTC_AVAILABLE = False
+if not IS_CLOUD:  # Only try WebRTC in local environments
+    try:
+        from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration, WebRtcMode
+        import av
+        WEBRTC_AVAILABLE = True
+    except ImportError:
+        WEBRTC_AVAILABLE = False
+
+# Page configuration
 st.set_page_config(
     page_title="Deteksi Defect Pakaian",
     page_icon="👕",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# Judul aplikasi
-st.title('👕 Deteksi Defect Pakaian dengan YOLOv11')
-st.write('Aplikasi ini mendeteksi defect pada pakaian menggunakan model YOLOv11 dengan WebRTC')
+# Custom CSS for better UI
+st.markdown("""
+<style>
+    .main-header {
+        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        padding: 1rem;
+        border-radius: 10px;
+        color: white;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .metric-card {
+        background: #f8f9fa;
+        padding: 1rem;
+        border-radius: 10px;
+        border-left: 4px solid #667eea;
+    }
+    .status-success { color: #28a745; font-weight: bold; }
+    .status-error { color: #dc3545; font-weight: bold; }
+    .status-warning { color: #ffc107; font-weight: bold; }
+</style>
+""", unsafe_allow_html=True)
 
-# Fungsi untuk download model dari Google Drive atau URL
-@st.cache_resource
+# Main header
+st.markdown("""
+<div class="main-header">
+    <h1>👕 Deteksi Defect Pakaian dengan YOLOv11</h1>
+    <p>Aplikasi AI untuk mendeteksi cacat pada pakaian secara otomatis</p>
+</div>
+""", unsafe_allow_html=True)
+
+# Model download and loading functions
+@st.cache_resource(show_spinner=False)
 def download_model():
     """Download model dari Google Drive atau URL eksternal"""
-    model_url = os.getenv('MODEL_URL')  # Set di environment variables
+    model_url = os.getenv('MODEL_URL')
     model_path = "best.pt"
     
     if model_url:
         try:
-            with st.spinner("Mengunduh model..."):
+            with st.spinner("🔄 Mengunduh model AI..."):
                 if 'drive.google.com' in model_url:
-                    # Ekstrak file ID dari Google Drive URL
                     file_id = model_url.split('/d/')[1].split('/')[0]
-                    gdown.download(f'https://drive.google.com/uc?id={file_id}', model_path, quiet=False)
+                    gdown.download(f'https://drive.google.com/uc?id={file_id}', model_path, quiet=True)
                 else:
-                    # Download dari URL biasa
-                    response = requests.get(model_url)
+                    response = requests.get(model_url, timeout=30)
+                    response.raise_for_status()
                     with open(model_path, 'wb') as f:
                         f.write(response.content)
-                st.success("Model berhasil diunduh!")
                 return model_path
         except Exception as e:
-            st.error(f"Gagal mengunduh model: {e}")
+            st.error(f"❌ Gagal mengunduh model: {str(e)}")
             return None
     else:
-        st.warning("URL model tidak ditemukan. Set MODEL_URL di environment variables.")
-        return None
-
-# Fungsi untuk memuat model
-@st.cache_resource
-def load_model():
-    try:
-        # Coba load model lokal terlebih dahulu
-        model_path = "best.pt"
         if not os.path.exists(model_path):
-            # Jika tidak ada, coba download
-            model_path = download_model()
-            if not model_path:
-                return None
+            st.warning("⚠️ Model tidak ditemukan. Set MODEL_URL di environment variables atau upload file model.")
+        return model_path if os.path.exists(model_path) else None
+
+@st.cache_resource(show_spinner=False)
+def load_model():
+    """Load YOLOv11 model dengan error handling"""
+    try:
+        model_path = download_model()
+        if not model_path or not os.path.exists(model_path):
+            return None
         
-        # Import YOLO di sini untuk menghindari error jika ultralytics tidak tersedia
         try:
             from ultralytics import YOLO
             model = YOLO(model_path)
-            st.success("Model berhasil dimuat!")
             return model
         except ImportError:
-            st.error("Ultralytics tidak terinstall. Jalankan: pip install ultralytics")
+            st.error("❌ Ultralytics tidak terinstall. Jalankan: `pip install ultralytics`")
             return None
             
     except Exception as e:
-        st.error(f"Gagal memuat model: {e}")
-        st.info("Pastikan file model tersedia atau set MODEL_URL di environment variables")
+        st.error(f"❌ Gagal memuat model: {str(e)}")
         return None
 
-# Fungsi deteksi (dengan fallback jika model tidak tersedia)
-def detect_defects(model, image, conf_threshold):
+def detect_defects(model, image, conf_threshold=0.5):
+    """Deteksi defect pada gambar"""
     if model is None:
-        # Return dummy detection untuk demo
         return image, []
     
     try:
-        results = model(image, conf=conf_threshold)
+        results = model(image, conf=conf_threshold, verbose=False)
         annotated_image = results[0].plot()
-
+        
         boxes = results[0].boxes
         names = results[0].names
-
+        
         detections = []
-        if boxes is not None and len(boxes) > 0 and boxes.xyxy is not None:
+        if boxes is not None and len(boxes) > 0:
             for i in range(len(boxes)):
                 box = boxes.xyxy[i].tolist()
                 conf = boxes.conf[i].item()
                 cls_id = int(boxes.cls[i].item())
-                cls_name = names[cls_id] if names and cls_id in names else str(cls_id)
+                cls_name = names.get(cls_id, f"Class_{cls_id}")
+                
                 detections.append({
-                    "name": cls_name,
-                    "confidence": round(conf, 3),
-                    "xmin": round(box[0], 1),
-                    "ymin": round(box[1], 1),
-                    "xmax": round(box[2], 1),
-                    "ymax": round(box[3], 1),
+                    "Jenis Defect": cls_name,
+                    "Confidence": round(conf, 3),
+                    "X1": round(box[0], 1),
+                    "Y1": round(box[1], 1),
+                    "X2": round(box[2], 1),
+                    "Y2": round(box[3], 1),
+                    "Area": round((box[2] - box[0]) * (box[3] - box[1]), 1)
                 })
-
+        
         return annotated_image, detections
+        
     except Exception as e:
-        st.error(f"Error dalam deteksi: {e}")
+        st.error(f"❌ Error dalam deteksi: {str(e)}")
         return image, []
 
-# Class VideoTransformer untuk WebRTC
+# Enhanced VideoTransformer with better error handling
 class DefectDetectionTransformer(VideoTransformerBase):
-    def __init__(self, model=None, conf_threshold=0.5, detection_frequency=0.5):
+    def __init__(self, model=None, conf_threshold=0.5):
         self.model = model
         self.conf_threshold = conf_threshold
-        self.detection_frequency = detection_frequency  # deteksi setiap 0.5 detik
-        self.last_detection_time = 0
-        self.last_detections = []
         self.frame_count = 0
-        self.fps_start_time = time.time()
-        self.current_fps = 0
+        self.detection_count = 0
+        self.last_detections = []
+        self.process_every_n_frames = 5  # Process every 5th frame for performance
         
-        # Queue untuk sharing hasil deteksi dengan main thread
-        self.detection_queue = queue.Queue(maxsize=1)
-        
-    def set_model(self, model):
-        self.model = model
-        
-    def set_conf_threshold(self, threshold):
-        self.conf_threshold = threshold
-        
-    def set_detection_frequency(self, frequency):
-        self.detection_frequency = frequency
-    
     def transform(self, frame):
         img = frame.to_ndarray(format="bgr24")
         
-        # Hitung FPS
-        self.frame_count += 1
-        current_time = time.time()
-        if current_time - self.fps_start_time >= 1.0:
-            self.current_fps = self.frame_count / (current_time - self.fps_start_time)
-            self.frame_count = 0
-            self.fps_start_time = current_time
-        
-        # Convert BGR ke RGB untuk model
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        
-        # Lakukan deteksi berdasarkan frekuensi
-        if current_time - self.last_detection_time >= self.detection_frequency:
-            if self.model is not None:
-                try:
-                    _, detections = detect_defects(self.model, img_rgb, self.conf_threshold)
-                    self.last_detections = detections
-                    self.last_detection_time = current_time
-                    
-                    # Simpan hasil deteksi ke queue untuk main thread
-                    try:
-                        if not self.detection_queue.empty():
-                            self.detection_queue.get_nowait()  # Hapus hasil lama
-                        self.detection_queue.put_nowait({
-                            'detections': detections,
-                            'fps': self.current_fps,
-                            'timestamp': current_time
-                        })
-                    except queue.Full:
-                        pass
-                        
-                except Exception as e:
-                    print(f"Error in detection: {e}")
-        
-        # Gambar bounding box dari deteksi terakhir
-        if self.last_detections:
-            for det in self.last_detections:
-                # Konversi koordinat ke integer
-                x1, y1, x2, y2 = int(det['xmin']), int(det['ymin']), int(det['xmax']), int(det['ymax'])
-                
-                # Gambar bounding box
-                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                
-                # Gambar label
-                label = f"{det['name']}: {det['confidence']:.2f}"
-                label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-                cv2.rectangle(img, (x1, y1 - label_size[1] - 10), (x1 + label_size[0], y1), (0, 255, 0), -1)
-                cv2.putText(img, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-        
-        # Tambahkan informasi FPS
-        fps_text = f"FPS: {self.current_fps:.1f}"
-        cv2.putText(img, fps_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
-    
-    def get_detection_results(self):
-        """Ambil hasil deteksi terbaru"""
         try:
-            return self.detection_queue.get_nowait()
-        except queue.Empty:
-            return None
+            # Only process every nth frame to improve performance
+            if self.frame_count % self.process_every_n_frames == 0 and self.model:
+                img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                _, detections = detect_defects(self.model, img_rgb, self.conf_threshold)
+                self.last_detections = detections
+                if detections:
+                    self.detection_count += len(detections)
+            
+            # Draw previous detections
+            for det in self.last_detections:
+                x1, y1, x2, y2 = int(det['X1']), int(det['Y1']), int(det['X2']), int(det['Y2'])
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                label = f"{det['Jenis Defect']}: {det['Confidence']:.2f}"
+                cv2.putText(img, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            
+            # Add frame info
+            cv2.putText(img, f"Frame: {self.frame_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(img, f"Detections: {len(self.last_detections)}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            
+            self.frame_count += 1
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
+            
+        except Exception as e:
+            # Return original frame on error
+            cv2.putText(img, f"Error: {str(e)[:50]}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-# Muat model
-model = load_model()
+# Load model
+with st.spinner("🔄 Memuat model AI..."):
+    model = load_model()
 
-# Sidebar pengaturan
-st.sidebar.title("⚙️ Pengaturan")
-confidence_threshold = st.sidebar.slider("Confidence Threshold", 0.0, 1.0, 0.5, 0.05)
-detection_frequency = st.sidebar.slider("Frekuensi Deteksi (detik)", 0.1, 2.0, 0.5, 0.1)
+# Sidebar
+st.sidebar.markdown("## ⚙️ Pengaturan")
 
-# Pilihan sumber input
-input_source = st.sidebar.radio(
-    "Pilih Sumber Input", 
-    ["Kamera WebRTC", "Upload Gambar", "Upload Video"]
+# Model status
+if model:
+    st.sidebar.markdown('<p class="status-success">✅ Model siap digunakan</p>', unsafe_allow_html=True)
+else:
+    st.sidebar.markdown('<p class="status-error">❌ Model tidak tersedia</p>', unsafe_allow_html=True)
+    st.sidebar.info("Upload model atau set MODEL_URL untuk menggunakan fitur deteksi.")
+
+# Settings
+confidence_threshold = st.sidebar.slider(
+    "🎯 Confidence Threshold", 
+    min_value=0.0, 
+    max_value=1.0, 
+    value=0.5, 
+    step=0.05,
+    help="Tingkat kepercayaan minimum untuk deteksi"
 )
 
-# WebRTC Configuration
-rtc_config = RTCConfiguration({
-    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
-})
+# Input source selection
+input_options = ["📁 Upload Gambar", "🎥 Upload Video"]
+if WEBRTC_AVAILABLE and not IS_CLOUD:
+    input_options.insert(0, "📹 Kamera Real-time")
 
-# Media constraints
-media_stream_constraints = {
-    "video": {
-        "width": {"min": 640, "ideal": 1280}, 
-        "height": {"min": 480, "ideal": 720}
-    },
-    "audio": False,
-}
+input_source = st.sidebar.radio("📥 Pilih Sumber Input", input_options)
 
-# Tambahkan informasi deployment
+# Deployment info
 with st.sidebar.expander("ℹ️ Info Deployment"):
-    st.write("""
-    **Dependencies yang diperlukan:**
-    ```
-    pip install streamlit-webrtc opencv-python ultralytics pillow gdown
+    st.markdown("""
+    **Dependencies:**
+    ```bash
+    pip install streamlit opencv-python ultralytics pillow gdown
+    pip install streamlit-webrtc  # Untuk kamera real-time
     ```
     
-    **Untuk deployment:**
-    1. Upload model ke Google Drive
-    2. Set MODEL_URL di secrets/environment
-    3. WebRTC bekerja di browser modern
+    **Environment Variables:**
+    - `MODEL_URL`: URL model YOLOv11 (.pt file)
+    
+    **Catatan:**
+    - WebRTC hanya stabil di environment lokal
+    - Untuk cloud deployment, gunakan upload file
     """)
 
-# Kamera WebRTC
-if input_source == "Kamera WebRTC":
-    st.header("📹 Deteksi Real-time dengan WebRTC")
+# Main content based on input source
+if "Kamera Real-time" in input_source and WEBRTC_AVAILABLE:
+    st.header("📹 Deteksi Real-time")
     
-    # Kontrol WebRTC
-    col1, col2 = st.columns([3, 1])
-    
-    with col1:
-        st.write("**Pengaturan Kamera:**")
-        show_stats = st.checkbox("Tampilkan Statistik Real-time", True)
-    
-    with col2:
-        st.write("**Status Model:**")
-        if model:
-            st.success("✅ Siap")
-        else:
-            st.error("❌ Tidak tersedia")
-    
-    # Factory function untuk membuat transformer
-    def create_transformer():
-        return DefectDetectionTransformer(
-            model=model,
-            conf_threshold=confidence_threshold,
-            detection_frequency=detection_frequency
-        )
-    
-    # WebRTC Streamer dengan factory function yang benar
-    webrtc_ctx = webrtc_streamer(
-        key="defect-detection",
-        video_transformer_factory=create_transformer,
-        rtc_configuration=rtc_config,
-        media_stream_constraints=media_stream_constraints,
-        async_transform=True,
-    )
-    
-    # Area untuk menampilkan hasil deteksi
-    if webrtc_ctx.state.playing and webrtc_ctx.video_transformer:
-        # Placeholder untuk hasil deteksi dan statistik
-        if show_stats:
-            stats_placeholder = st.empty()
-        detection_placeholder = st.empty()
-        
-        # Update pengaturan transformer
-        if hasattr(webrtc_ctx.video_transformer, 'set_conf_threshold'):
-            webrtc_ctx.video_transformer.set_conf_threshold(confidence_threshold)
-            webrtc_ctx.video_transformer.set_detection_frequency(detection_frequency)
-            webrtc_ctx.video_transformer.set_model(model)
-        
-        # Timer untuk refresh display
-        if 'webrtc_last_update' not in st.session_state:
-            st.session_state.webrtc_last_update = time.time()
-        
-        # Refresh setiap 500ms
-        if time.time() - st.session_state.webrtc_last_update > 0.5:
-            if hasattr(webrtc_ctx.video_transformer, 'get_detection_results'):
-                results = webrtc_ctx.video_transformer.get_detection_results()
-                
-                if results:
-                    detections = results['detections']
-                    fps = results['fps']
-                    
-                    # Tampilkan statistik
-                    if show_stats:
-                        with stats_placeholder.container():
-                            col1, col2, col3, col4 = st.columns(4)
-                            with col1:
-                                st.metric("FPS", f"{fps:.1f}")
-                            with col2:
-                                st.metric("Defect Terdeteksi", len(detections))
-                            with col3:
-                                if detections:
-                                    avg_conf = np.mean([d['confidence'] for d in detections])
-                                    st.metric("Avg Confidence", f"{avg_conf:.3f}")
-                                else:
-                                    st.metric("Avg Confidence", "0.000")
-                            with col4:
-                                st.metric("Status", "🟢 Aktif")
-                    
-                    # Tampilkan hasil deteksi
-                    with detection_placeholder.container():
-                        if detections:
-                            st.subheader(f"🔍 Defect Terdeteksi: {len(detections)} item")
-                            
-                            # Buat dataframe untuk hasil deteksi
-                            detection_df = []
-                            for det in detections:
-                                detection_df.append({
-                                    "Jenis": det['name'],
-                                    "Confidence": f"{det['confidence']:.3f}",
-                                    "Koordinat": f"({det['xmin']:.0f}, {det['ymin']:.0f}) - ({det['xmax']:.0f}, {det['ymax']:.0f})"
-                                })
-                            
-                            st.dataframe(detection_df, use_container_width=True)
-                            
-                            # Alert untuk confidence tinggi
-                            high_conf_detections = [d for d in detections if d['confidence'] > 0.8]
-                            if high_conf_detections:
-                                st.warning(f"⚠️ Ditemukan {len(high_conf_detections)} defect dengan confidence tinggi (>0.8)")
-                        else:
-                            st.success("✅ Tidak ada defect terdeteksi")
-            
-            st.session_state.webrtc_last_update = time.time()
-            
-        # Auto-refresh untuk update real-time
-        time.sleep(0.5)
-        st.rerun()
-            
+    if IS_CLOUD:
+        st.error("❌ WebRTC tidak didukung di Streamlit Cloud. Gunakan upload file sebagai alternatif.")
     else:
-        st.info("👆 Klik tombol 'START' untuk memulai deteksi real-time")
-        st.write("""
-        **Petunjuk Penggunaan WebRTC:**
-        1. Klik tombol 'START' di atas
-        2. Berikan izin akses kamera pada browser
-        3. Tunggu beberapa detik untuk inisialisasi
-        4. Arahkan kamera ke pakaian untuk mendeteksi defect
-        5. Hasil deteksi akan ditampilkan di bawah video
+        col1, col2 = st.columns([2, 1])
         
-        **Catatan:**
-        - WebRTC bekerja optimal di browser Chrome/Firefox
-        - Pastikan koneksi internet stabil
-        - Gunakan pencahayaan yang cukup untuk hasil terbaik
-        """)
+        with col1:
+            st.info("💡 **Tips:** Pastikan pencahayaan cukup dan kamera stabil untuk hasil optimal")
+        
+        with col2:
+            if model:
+                st.success("🟢 Siap mendeteksi")
+            else:
+                st.error("🔴 Model tidak tersedia")
+        
+        # WebRTC configuration
+        rtc_config = RTCConfiguration({
+            "iceServers": [
+                {"urls": ["stun:stun.l.google.com:19302"]},
+                {"urls": ["stun:stun1.l.google.com:19302"]},
+            ]
+        })
+        
+        try:
+            webrtc_ctx = webrtc_streamer(
+                key="defect-detection-camera",
+                mode=WebRtcMode.SENDRECV,
+                video_transformer_factory=lambda: DefectDetectionTransformer(model, confidence_threshold),
+                rtc_configuration=rtc_config,
+                media_stream_constraints={
+                    "video": {"width": 640, "height": 480},
+                    "audio": False
+                }
+            )
+            
+            if webrtc_ctx.state.playing:
+                st.success("🔴 Live - Deteksi aktif")
+            else:
+                st.info("⏹️ Klik START untuk memulai deteksi real-time")
+                
+        except Exception as e:
+            st.error(f"❌ Error WebRTC: {str(e)}")
 
-# Deteksi via Upload Gambar
-elif input_source == "Upload Gambar":
-    st.header("📁 Deteksi via Upload Gambar")
+elif "Upload Gambar" in input_source:
+    st.header("📁 Analisis Gambar")
     
+    # File uploader
     uploaded_file = st.file_uploader(
-        "Pilih file gambar...", 
+        "Pilih gambar pakaian:",
         type=["jpg", "jpeg", "png", "bmp", "tiff"],
-        help="Upload gambar pakaian untuk mendeteksi defect"
+        help="Format yang didukung: JPG, PNG, BMP, TIFF (Max: 10MB)"
     )
-
+    
     if uploaded_file is not None:
-        # Validasi ukuran file (maksimal 10MB)
+        # File size check
         if uploaded_file.size > 10 * 1024 * 1024:
-            st.error("Ukuran file terlalu besar! Maksimal 10MB.")
+            st.error("❌ File terlalu besar! Maksimal 10MB.")
         else:
             try:
-                # Simpan gambar ke session state
-                if 'uploaded_image' not in st.session_state or st.session_state['uploaded_image_name'] != uploaded_file.name:
-                    image = Image.open(uploaded_file)
-                    # Resize jika terlalu besar
-                    if image.size[0] > 1920 or image.size[1] > 1920:
-                        image.thumbnail((1920, 1920), Image.Resampling.LANCZOS)
-                    st.session_state['uploaded_image'] = np.array(image)
-                    st.session_state['uploaded_image_name'] = uploaded_file.name
-                    
-                img_array = st.session_state['uploaded_image']
+                # Process image
+                image = Image.open(uploaded_file)
+                if image.mode != 'RGB':
+                    image = image.convert('RGB')
                 
-                if model:
-                    with st.spinner('Mendeteksi defect...'):
-                        img_with_boxes, detections = detect_defects(model, img_array, confidence_threshold)
-                        
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            st.subheader("Gambar Asli")
-                            st.image(img_array, use_container_width=True)
-                        
-                        with col2:
-                            st.subheader("Hasil Deteksi")
-                            st.image(img_with_boxes, use_container_width=True)
-                        
-                        if detections:
-                            st.subheader(f"Deteksi Defect (Confidence ≥ {confidence_threshold})")
-                            st.dataframe(detections, use_container_width=True)
+                # Resize if too large
+                max_size = 1920
+                if max(image.size) > max_size:
+                    image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                
+                img_array = np.array(image)
+                
+                # Display original image
+                st.subheader("📷 Gambar Input")
+                st.image(image, use_container_width=True)
+                
+                # Analyze button
+                if st.button("🔍 Analisis Defect", type="primary", use_container_width=True):
+                    if model:
+                        with st.spinner("🔄 Menganalisis gambar..."):
+                            img_with_boxes, detections = detect_defects(model, img_array, confidence_threshold)
                             
-                            # Statistik deteksi
-                            col1, col2, col3 = st.columns(3)
+                            # Results
+                            st.subheader("📊 Hasil Analisis")
+                            
+                            col1, col2 = st.columns(2)
+                            
                             with col1:
-                                st.metric("Total Defect", len(detections))
+                                st.markdown("**Gambar dengan Deteksi:**")
+                                st.image(img_with_boxes, use_container_width=True)
+                            
                             with col2:
-                                avg_conf = np.mean([d['confidence'] for d in detections])
-                                st.metric("Avg Confidence", f"{avg_conf:.3f}")
-                            with col3:
-                                unique_classes = len(set(d['name'] for d in detections))
-                                st.metric("Jenis Defect", unique_classes)
-                        else:
-                            st.success("✅ Tidak ada defect yang terdeteksi.")
-                else:
-                    st.image(img_array, caption="Gambar yang diupload (Model tidak tersedia)", use_container_width=True)
-                    st.warning("Model tidak tersedia. Hasil deteksi tidak dapat ditampilkan.")
-                    
+                                if detections:
+                                    # Statistics
+                                    total_defects = len(detections)
+                                    avg_confidence = np.mean([d['Confidence'] for d in detections])
+                                    defect_types = len(set(d['Jenis Defect'] for d in detections))
+                                    
+                                    st.markdown("**Statistik:**")
+                                    
+                                    # Metrics
+                                    metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
+                                    with metrics_col1:
+                                        st.metric("Total Defect", total_defects, delta=None)
+                                    with metrics_col2:
+                                        st.metric("Avg Confidence", f"{avg_confidence:.3f}", delta=None)
+                                    with metrics_col3:
+                                        st.metric("Jenis Defect", defect_types, delta=None)
+                                    
+                                    # Detailed results
+                                    st.markdown("**Detail Deteksi:**")
+                                    st.dataframe(detections, use_container_width=True)
+                                    
+                                    # Severity analysis
+                                    high_conf = sum(1 for d in detections if d['Confidence'] > 0.8)
+                                    if high_conf > 0:
+                                        st.warning(f"⚠️ {high_conf} defect dengan confidence tinggi (>0.8)")
+                                    
+                                else:
+                                    st.success("✅ Tidak ada defect terdeteksi!")
+                                    st.balloons()
+                    else:
+                        st.error("❌ Model tidak tersedia untuk analisis.")
+                        
             except Exception as e:
-                st.error(f"Error memproses gambar: {e}")
+                st.error(f"❌ Error memproses gambar: {str(e)}")
 
-# Deteksi via Upload Video
-elif input_source == "Upload Video":
-    st.header("🎥 Deteksi via Upload Video")
+elif "Upload Video" in input_source:
+    st.header("🎥 Analisis Video")
     
     uploaded_video = st.file_uploader(
-        "Pilih file video...", 
-        type=["mp4", "avi", "mov", "mkv"],
-        help="Upload video pakaian untuk mendeteksi defect"
+        "Pilih file video:",
+        type=["mp4", "avi", "mov", "mkv", "webm"],
+        help="Format yang didukung: MP4, AVI, MOV, MKV, WEBM (Max: 100MB)"
     )
-
+    
     if uploaded_video is not None:
-        # Validasi ukuran file (maksimal 50MB)
-        if uploaded_video.size > 50 * 1024 * 1024:
-            st.error("Ukuran file terlalu besar! Maksimal 50MB.")
+        if uploaded_video.size > 100 * 1024 * 1024:
+            st.error("❌ File terlalu besar! Maksimal 100MB.")
         else:
             try:
-                # Simpan video ke file sementara
-                if 'video_path' not in st.session_state or st.session_state['video_name'] != uploaded_video.name:
-                    tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+                # Save video temporarily
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tfile:
                     tfile.write(uploaded_video.read())
-                    tfile.close()
-                    st.session_state['video_path'] = tfile.name
-                    st.session_state['video_name'] = uploaded_video.name
+                    video_path = tfile.name
+                
+                # Video info
+                cap = cv2.VideoCapture(video_path)
+                if not cap.isOpened():
+                    st.error("❌ Gagal membuka video.")
+                else:
+                    fps = int(cap.get(cv2.CAP_PROP_FPS))
+                    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    duration = frame_count / fps if fps > 0 else 0
+                    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                     
-                    # Baca informasi video
-                    cap = cv2.VideoCapture(st.session_state['video_path'])
-                    st.session_state['video_fps'] = int(cap.get(cv2.CAP_PROP_FPS))
-                    st.session_state['video_frame_count'] = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    # Video info display
+                    st.subheader("📹 Informasi Video")
+                    info_col1, info_col2, info_col3, info_col4 = st.columns(4)
+                    
+                    with info_col1:
+                        st.metric("Durasi", f"{duration:.1f}s")
+                    with info_col2:
+                        st.metric("FPS", fps)
+                    with info_col3:
+                        st.metric("Resolusi", f"{width}x{height}")
+                    with info_col4:
+                        st.metric("Total Frame", frame_count)
+                    
+                    # Analysis options
+                    st.subheader("⚙️ Opsi Analisis")
+                    
+                    analysis_col1, analysis_col2 = st.columns(2)
+                    
+                    with analysis_col1:
+                        # Single frame analysis
+                        st.markdown("**Analisis Frame Tunggal:**")
+                        frame_number = st.slider('Pilih Frame', 0, frame_count-1, 0)
+                        
+                        if st.button("🔍 Analisis Frame Ini", use_container_width=True):
+                            if model:
+                                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+                                ret, frame = cap.read()
+                                
+                                if ret:
+                                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                                    
+                                    with st.spinner("🔄 Menganalisis frame..."):
+                                        frame_with_boxes, detections = detect_defects(model, frame_rgb, confidence_threshold)
+                                        
+                                        st.subheader(f"📊 Hasil Frame {frame_number}")
+                                        
+                                        display_col1, display_col2 = st.columns(2)
+                                        
+                                        with display_col1:
+                                            st.markdown("**Frame Asli:**")
+                                            st.image(frame_rgb, use_container_width=True)
+                                        
+                                        with display_col2:
+                                            st.markdown("**Hasil Deteksi:**")
+                                            st.image(frame_with_boxes, use_container_width=True)
+                                        
+                                        if detections:
+                                            st.markdown("**Detail Deteksi:**")
+                                            st.dataframe(detections, use_container_width=True)
+                                        else:
+                                            st.success("✅ Tidak ada defect pada frame ini")
+                            else:
+                                st.error("❌ Model tidak tersedia")
+                    
+                    with analysis_col2:
+                        # Batch analysis
+                        st.markdown("**Analisis Batch:**")
+                        sample_frames = st.number_input(
+                            "Jumlah sample frame:", 
+                            min_value=5, 
+                            max_value=min(50, frame_count), 
+                            value=10
+                        )
+                        
+                        if st.button("🎯 Analisis Sample Frames", use_container_width=True):
+                            if model:
+                                with st.spinner(f"🔄 Menganalisis {sample_frames} frames..."):
+                                    # Sample frames evenly
+                                    sample_indices = np.linspace(0, frame_count-1, sample_frames, dtype=int)
+                                    
+                                    all_detections = []
+                                    frames_with_defects = 0
+                                    progress_bar = st.progress(0)
+                                    
+                                    for i, frame_idx in enumerate(sample_indices):
+                                        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                                        ret, frame = cap.read()
+                                        
+                                        if ret:
+                                            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                                            _, detections = detect_defects(model, frame_rgb, confidence_threshold)
+                                            
+                                            if detections:
+                                                frames_with_defects += 1
+                                                for det in detections:
+                                                    det['Frame'] = frame_idx
+                                                    det['Timestamp'] = f"{frame_idx / fps:.1f}s"
+                                                all_detections.extend(detections)
+                                        
+                                        progress_bar.progress((i + 1) / sample_frames)
+                                    
+                                    # Results summary
+                                    st.subheader("📈 Ringkasan Analisis Batch")
+                                    
+                                    summary_col1, summary_col2, summary_col3, summary_col4 = st.columns(4)
+                                    
+                                    with summary_col1:
+                                        st.metric("Total Defect", len(all_detections))
+                                    with summary_col2:
+                                        st.metric("Frames dengan Defect", frames_with_defects)
+                                    with summary_col3:
+                                        if all_detections:
+                                            avg_conf = np.mean([d['Confidence'] for d in all_detections])
+                                            st.metric("Avg Confidence", f"{avg_conf:.3f}")
+                                        else:
+                                            st.metric("Avg Confidence", "0.000")
+                                    with summary_col4:
+                                        if all_detections:
+                                            defect_types = len(set(d['Jenis Defect'] for d in all_detections))
+                                            st.metric("Jenis Defect", defect_types)
+                                        else:
+                                            st.metric("Jenis Defect", "0")
+                                    
+                                    if all_detections:
+                                        st.markdown("**Detail Semua Deteksi:**")
+                                        st.dataframe(all_detections, use_container_width=True)
+                                        
+                                        # Defect timeline
+                                        defect_by_frame = {}
+                                        for det in all_detections:
+                                            frame = det['Frame']
+                                            if frame not in defect_by_frame:
+                                                defect_by_frame[frame] = 0
+                                            defect_by_frame[frame] += 1
+                                        
+                                        st.markdown("**Timeline Defect:**")
+                                        timeline_data = []
+                                        for frame, count in sorted(defect_by_frame.items()):
+                                            timeline_data.append({
+                                                'Frame': frame,
+                                                'Timestamp': f"{frame/fps:.1f}s",
+                                                'Jumlah Defect': count
+                                            })
+                                        st.dataframe(timeline_data, use_container_width=True)
+                                    else:
+                                        st.success("✅ Tidak ada defect terdeteksi di semua sample frames!")
+                                        st.balloons()
+                            else:
+                                st.error("❌ Model tidak tersedia")
+                    
                     cap.release()
                     
-                cap = cv2.VideoCapture(st.session_state['video_path'])
-
-                if not cap.isOpened():
-                    st.error("Gagal membuka video.")
-                else:
-                    fps = st.session_state['video_fps']
-                    frame_count = st.session_state['video_frame_count']
-                    duration = frame_count / fps if fps > 0 else 0
-
-                    # Info video
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("FPS", fps)
-                    with col2:
-                        st.metric("Total Frame", frame_count)
-                    with col3:
-                        st.metric("Durasi", f"{duration:.1f}s")
-                    
-                    frame_number = st.slider('Pilih Frame', 0, frame_count-1, 0, help="Geser untuk memilih frame yang ingin dianalisis")
-                    
-                    # Tambahkan tombol untuk deteksi batch
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if st.button("🔍 Deteksi Frame Ini"):
-                            st.session_state['detect_single'] = True
-                    with col2:
-                        sample_frames = st.number_input("Deteksi Sample (frame)", min_value=1, max_value=min(50, frame_count), value=10)
-                        if st.button("🎯 Deteksi Sample Frames"):
-                            st.session_state['detect_sample'] = sample_frames
-                    
-                    # Deteksi single frame
-                    if st.session_state.get('detect_single', False):
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-                        ret, frame = cap.read()
+                    # Cleanup
+                    try:
+                        os.unlink(video_path)
+                    except:
+                        pass
                         
-                        if ret:
-                            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                            
-                            if model:
-                                with st.spinner('Mendeteksi defect...'):
-                                    frame_with_boxes, detections = detect_defects(model, frame_rgb, confidence_threshold)
-                                    
-                                    col1, col2 = st.columns(2)
-                                    
-                                    with col1:
-                                        st.subheader(f"Frame Asli ({frame_number}/{frame_count-1})")
-                                        st.image(frame_rgb, use_container_width=True)
-                                    
-                                    with col2:
-                                        st.subheader("Hasil Deteksi")
-                                        st.image(frame_with_boxes, use_container_width=True)
-                                    
-                                    if detections:
-                                        st.subheader(f"Deteksi Defect (Confidence ≥ {confidence_threshold})")
-                                        st.dataframe(detections, use_container_width=True)
-                                    else:
-                                        st.info("Tidak ada defect yang terdeteksi pada frame ini.")
-                            else:
-                                st.image(frame_rgb, caption=f"Frame {frame_number} (Model tidak tersedia)", use_container_width=True)
-                        
-                        st.session_state['detect_single'] = False
-                    
-                    # Deteksi sample frames
-                    if st.session_state.get('detect_sample', 0) > 0:
-                        sample_count = st.session_state['detect_sample']
-                        
-                        if model:
-                            with st.spinner(f'Mendeteksi {sample_count} sample frames...'):
-                                # Pilih frame secara merata
-                                sample_indices = np.linspace(0, frame_count-1, sample_count, dtype=int)
-                                
-                                all_detections = []
-                                progress_bar = st.progress(0)
-                                
-                                for i, frame_idx in enumerate(sample_indices):
-                                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                                    ret, frame = cap.read()
-                                    
-                                    if ret:
-                                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                                        _, detections = detect_defects(model, frame_rgb, confidence_threshold)
-                                        
-                                        for det in detections:
-                                            det['frame'] = frame_idx
-                                            det['timestamp'] = frame_idx / fps
-                                        
-                                        all_detections.extend(detections)
-                                    
-                                    progress_bar.progress((i + 1) / sample_count)
-                                
-                                # Tampilkan hasil
-                                if all_detections:
-                                    st.subheader(f"📊 Hasil Deteksi {sample_count} Sample Frames")
-                                    
-                                    # Statistik
-                                    col1, col2, col3, col4 = st.columns(4)
-                                    with col1:
-                                        st.metric("Total Defect", len(all_detections))
-                                    with col2:
-                                        frames_with_defects = len(set(det['frame'] for det in all_detections))
-                                        st.metric("Frames dengan Defect", frames_with_defects)
-                                    with col3:
-                                        avg_conf = np.mean([det['confidence'] for det in all_detections])
-                                        st.metric("Avg Confidence", f"{avg_conf:.3f}")
-                                    with col4:
-                                        unique_classes = len(set(det['name'] for det in all_detections))
-                                        st.metric("Jenis Defect", unique_classes)
-                                    
-                                    # Detail deteksi
-                                    detection_df = []
-                                    for det in all_detections:
-                                        detection_df.append({
-                                            "Frame": det['frame'],
-                                            "Timestamp (s)": f"{det['timestamp']:.1f}",
-                                            "Jenis": det['name'],
-                                            "Confidence": f"{det['confidence']:.3f}",
-                                            "Koordinat": f"({det['xmin']:.0f},{det['ymin']:.0f})-({det['xmax']:.0f},{det['ymax']:.0f})"
-                                        })
-                                    
-                                    st.dataframe(detection_df, use_container_width=True)
-                                else:
-                                    st.success("✅ Tidak ada defect terdeteksi pada sample frames.")
-                        
-                        st.session_state['detect_sample'] = 0
-
-                cap.release()
-                
             except Exception as e:
-                st.error(f"Error memproses video: {e}")
+                st.error(f"❌ Error memproses video: {str(e)}")
 
 # Footer
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 📋 Petunjuk Penggunaan")
-st.sidebar.markdown("""
-**Kamera WebRTC:**
-1. Pilih 'Kamera WebRTC'
-2. Klik 'START' 
-3. Berikan izin akses kamera
-4. Lihat hasil deteksi real-time
-
-**Dependencies:**
-```
-pip install streamlit-webrtc opencv-python ultralytics pillow gdown
-```
-
-**Keunggulan WebRTC:**
-- Lebih stabil untuk streaming
-- Kompatibel dengan deployment cloud
-- Performa lebih baik
-- Built-in error handling
-""")
-
-st.sidebar.markdown("---")
-st.sidebar.write("© 2025 Deteksi Defect Pakaian")
-st.sidebar.write("🌐 Powered by WebRTC!")
-
-# Cleanup session state jika diperlukan
-if st.sidebar.button("🔄 Reset Session"):
-    for key in list(st.session_state.keys()):
-        if key.startswith(('uploaded_', 'video_', 'detect_', 'webrtc_')):
-            del st.session_state[key]
-    st.rerun()
+st.markdown("---")
+st.markdown("""
+<div style="text-align: center; color: #666; font-size: 0.9em;">
+    <p>🤖 Powered by YOLOv11 | 🚀 Built with Streamlit</p>
+    <p>💡 Tips: Gunakan gambar dengan pencahayaan yang baik untuk hasil optimal</p>
+</div>
+""", unsafe_allow_html=True)
