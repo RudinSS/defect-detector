@@ -11,7 +11,7 @@ import io
 # Page configuration
 st.set_page_config(
     page_title="Clothing Defect Detection",
-    page_icon="👗",
+    page_icon="👕",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -79,7 +79,7 @@ with st.sidebar:
         st.warning("Check your model ID and API key")
 
 # Main UI
-st.title("👗 Clothing Defect Detection")
+st.title("👕 Clothing Defect Detection")
 st.markdown("**Deteksi cacat pada pakaian menggunakan YOLOv11**")
 
 if model is None:
