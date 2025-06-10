@@ -26,7 +26,7 @@ def load_model():
         return model
     except Exception as e:
         st.error(f"Error loading model: {str(e)}")
-        st.info("Pastikan model ID sudah benar dan API key Roboflow sudah diset")
+        st.info("Pastikan model sudah benar")
         return None
 
 # Helper function: Run detection and draw bounding boxes
@@ -74,14 +74,13 @@ with st.sidebar:
     st.markdown("### 📋 Model Info")
     if model:
         st.success("✅ Model loaded successfully")
-        st.info("Model: YOLOv11 Fine-tuned\nSource: Roboflow")
     else:
         st.error("❌ Model not loaded")
         st.warning("Check your model ID and API key")
 
 # Main UI
 st.title("👗 Clothing Defect Detection")
-st.markdown("**Deteksi cacat pada pakaian menggunakan YOLOv11 yang di-fine-tune dengan Roboflow**")
+st.markdown("**Deteksi cacat pada pakaian menggunakan YOLOv11**")
 
 if model is None:
     st.error("Model tidak dapat dimuat. Silakan periksa konfigurasi model Anda.")
@@ -193,6 +192,5 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center'>
     <p>🔬 Powered by YOLOv11 & Roboflow | 🚀 Built with Streamlit</p>
-    <p><small>Pastikan untuk mengganti model_id dengan ID model Roboflow Anda yang sebenarnya</small></p>
 </div>
 """, unsafe_allow_html=True)
