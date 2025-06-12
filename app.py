@@ -22,7 +22,7 @@ def load_model():
     try:
         # Ganti dengan model ID Anda yang sebenarnya
         # Format: "workspace-name/project-name/version"
-        model = get_model(model_id="deteksi-defect-pakaian-merges/1")
+        model = get_model(model_id="deteksi-defect-pakaian-merges-fyiyz/1")
         return model
     except Exception as e:
         st.error(f"Error loading model: {str(e)}")
