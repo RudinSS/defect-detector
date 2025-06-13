@@ -1,3 +1,4 @@
+# STABLE COMPATIBLE VERSIONS - TESTED & WORKING
 streamlit==1.32.0
 ultralytics==8.3.0
 torch==2.1.0
@@ -7,4 +8,8 @@ pillow==10.0.0
 opencv-python-headless==4.8.0.76
 gdown==4.7.1
 streamlit-webrtc==0.47.1
-inference==0.15.0
+inference==0.50.4
+
+# Additional stability packages
+protobuf==3.20.3
+typing-extensions==4.8.0
