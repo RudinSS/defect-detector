@@ -1,3 +1,10 @@
+# CRITICAL FIX: Prevent PyTorch + Streamlit conflicts
+import os
+import warnings
+os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
+os.environ["STREAMLIT_SERVER_HEADLESS"] = "true"
+warnings.filterwarnings("ignore")
+
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 import cv2
@@ -7,6 +14,15 @@ import supervision as sv
 import av
 from PIL import Image
 import io
+
+# Additional PyTorch fix
+import sys
+import torch
+if hasattr(torch, '_classes'):
+    try:
+        delattr(torch, '_classes')
+    except:
+        pass
 
 # Page configuration
 st.set_page_config(
