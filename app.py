@@ -29,11 +29,18 @@ def load_model():
         st.info("Pastikan model sudah benar")
         return None
 
+# Load model at the top level
+model = load_model()
+
 # Helper function: Run detection and draw bounding boxes
 def detect_and_annotate(image, confidence_threshold=0.5):
     """
     Detect objects in image and return annotated image
     """
+    # Check if model is loaded
+    if model is None:
+        return image, None
+        
     try:
         # Run inference
         results = model.infer(image, confidence=confidence_threshold)[0]
@@ -54,9 +61,6 @@ def detect_and_annotate(image, confidence_threshold=0.5):
     except Exception as e:
         st.error(f"Error during detection: {str(e)}")
         return image, None
-
-# Load model
-model = load_model()
 
 # Sidebar
 with st.sidebar:
@@ -150,7 +154,7 @@ with tab2:
     st.header("Live Webcam Detection")
     st.markdown("**Real-time detection menggunakan webcam**")
     
-    # WebRTC Configuration
+    # WebRTC Configuration - Fixed deprecated parameter
     RTC_CONFIGURATION = RTCConfiguration({
         "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
     })
@@ -169,23 +173,38 @@ with tab2:
         - Sesuaikan confidence threshold di sidebar jika diperlukan
         """)
     
-    # WebRTC Streamer
+    # WebRTC Streamer with proper error handling
     def video_frame_callback(frame):
-        img = frame.to_ndarray(format="bgr24")
-        
-        # Run detection
-        annotated_img, _ = detect_and_annotate(img, confidence_threshold)
-        
-        return av.VideoFrame.from_ndarray(annotated_img, format="bgr24")
+        try:
+            img = frame.to_ndarray(format="bgr24")
+            
+            # Run detection only if model is available
+            if model is not None:
+                annotated_img, _ = detect_and_annotate(img, confidence_threshold)
+                return av.VideoFrame.from_ndarray(annotated_img, format="bgr24")
+            else:
+                # Return original frame if model is not available
+                return av.VideoFrame.from_ndarray(img, format="bgr24")
+                
+        except Exception as e:
+            # Log error and return original frame
+            print(f"Error in video callback: {e}")
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
     
-    webrtc_ctx = webrtc_streamer(
-        key="clothing-defect-detection",
-        mode=WebRtcMode.SENDRECV,
-        rtc_configuration=RTC_CONFIGURATION,
-        video_frame_callback=video_frame_callback,
-        media_stream_constraints={"video": True, "audio": False},
-        async_processing=True,
-    )
+    # Only create webrtc_streamer if model is loaded
+    if model is not None:
+        webrtc_ctx = webrtc_streamer(
+            key="clothing-defect-detection",
+            mode=WebRtcMode.SENDRECV,
+            # Use the new parameter names instead of deprecated rtc_configuration
+            frontend_rtc_configuration=RTC_CONFIGURATION,
+            server_rtc_configuration=RTC_CONFIGURATION,
+            video_frame_callback=video_frame_callback,
+            media_stream_constraints={"video": True, "audio": False},
+            async_processing=True,
+        )
+    else:
+        st.error("Cannot start webcam: Model not loaded")
 
 # Footer
 st.markdown("---")
