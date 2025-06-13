@@ -1,16 +1,10 @@
-# STABLE COMPATIBLE VERSIONS - CONFLICT RESOLVED
-streamlit==1.32.0
-ultralytics==8.3.0
-torch==2.1.0
-torchvision==0.16.0
-numpy==1.24.3
-pillow==10.0.0
-opencv-python-headless==4.8.0.76
-gdown==4.7.1
-streamlit-webrtc==0.47.1
-inference==0.50.4
-rich==13.5.2
-
-# Additional stability packages
-protobuf==3.20.3
-typing-extensions==4.8.0
+streamlit==1.45.0
+ultralytics>=8.3.0
+torch>=2.5.0
+torchvision
+numpy
+pillow
+opencv-python-headless
+gdown
+streamlit-webrtc
+inference
