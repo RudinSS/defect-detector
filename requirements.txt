@@ -8,7 +8,7 @@ pillow==10.0.0
 opencv-python-headless==4.8.0.76
 gdown==4.7.1
 streamlit-webrtc==0.47.1
-inference==0.15.0
+inference==0.50.4
 rich==13.5.2
 
 # Additional stability packages
