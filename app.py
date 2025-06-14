@@ -32,6 +32,49 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# WebRTC Connection Management
+import atexit
+import asyncio
+import threading
+from typing import Optional, Set
+import weakref
+
+# Global WebRTC connection tracker
+_webrtc_connections: Set = weakref.WeakSet()
+_cleanup_lock = threading.Lock()
+
+def safe_cleanup_webrtc():
+    """Safely cleanup WebRTC connections on app shutdown"""
+    with _cleanup_lock:
+        try:
+            # Get current event loop or create new one
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_closed():
+                    raise RuntimeError("Loop is closed")
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            # Close all tracked connections
+            for conn in list(_webrtc_connections):
+                try:
+                    if hasattr(conn, 'video_processor') and conn.video_processor:
+                        conn.video_processor = None
+                    if hasattr(conn, '_stop'):
+                        conn._stop()
+                except Exception as e:
+                    print(f"Warning: Error closing WebRTC connection: {e}")
+            
+            # Clear the set
+            _webrtc_connections.clear()
+            
+        except Exception as e:
+            print(f"Warning: Error during WebRTC cleanup: {e}")
+
+# Register cleanup
+atexit.register(safe_cleanup_webrtc)
+
 # Load YOLOv11 fine-tuned model from Roboflow
 @st.cache_resource
 def load_model():
@@ -47,6 +90,18 @@ def load_model():
 
 # Load model at the top level
 model = load_model()
+
+# Initialize WebRTC session state
+def init_webrtc_session():
+    """Initialize WebRTC session state"""
+    if 'webrtc_key' not in st.session_state:
+        st.session_state.webrtc_key = "clothing-defect-detection"
+    if 'webrtc_active' not in st.session_state:
+        st.session_state.webrtc_active = False
+    if 'frame_count' not in st.session_state:
+        st.session_state.frame_count = 0
+
+init_webrtc_session()
 
 # Helper function: Run detection and draw bounding boxes
 def detect_and_annotate(image, confidence_threshold=0.5):
@@ -77,6 +132,49 @@ def detect_and_annotate(image, confidence_threshold=0.5):
     except Exception as e:
         st.error(f"Error during detection: {str(e)}")
         return image, None
+
+# Safe video frame callback wrapper
+class SafeVideoProcessor:
+    def __init__(self, model, confidence_threshold):
+        self.model = model
+        self.confidence_threshold = confidence_threshold
+        self.frame_count = 0
+        self.error_count = 0
+        self.max_errors = 10
+        
+    def __call__(self, frame):
+        try:
+            self.frame_count += 1
+            
+            # Reset error count periodically
+            if self.frame_count % 100 == 0:
+                self.error_count = 0
+            
+            # Skip processing if too many errors
+            if self.error_count >= self.max_errors:
+                return frame
+            
+            # Convert frame
+            img = frame.to_ndarray(format="bgr24")
+            
+            # Run detection if model is available
+            if self.model is not None:
+                annotated_img, _ = detect_and_annotate(img, self.confidence_threshold)
+                return av.VideoFrame.from_ndarray(annotated_img, format="bgr24")
+            else:
+                return av.VideoFrame.from_ndarray(img, format="bgr24")
+                
+        except Exception as e:
+            self.error_count += 1
+            print(f"Video processing error #{self.error_count}: {e}")
+            
+            # Return original frame on error
+            try:
+                return frame
+            except:
+                # Create a black frame as fallback
+                black_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                return av.VideoFrame.from_ndarray(black_frame, format="bgr24")
 
 # Sidebar
 with st.sidebar:
@@ -166,13 +264,17 @@ with tab1:
             st.error(f"Error processing image: {str(e)}")
 
 # Tab 2: Live Webcam
+# Tab 2: Live Webcam - Improved version
 with tab2:
     st.header("Live Webcam Detection")
     st.markdown("**Real-time detection menggunakan webcam**")
     
-    # WebRTC Configuration - Fixed deprecated parameter
+    # WebRTC Configuration - Improved
     RTC_CONFIGURATION = RTCConfiguration({
-        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302"]},
+            {"urls": ["stun:stun1.l.google.com:19302"]},
+        ]
     })
     
     # Instructions
@@ -189,38 +291,108 @@ with tab2:
         - Sesuaikan confidence threshold di sidebar jika diperlukan
         """)
     
-    # WebRTC Streamer with proper error handling
-    def video_frame_callback(frame):
-        try:
-            img = frame.to_ndarray(format="bgr24")
-            
-            # Run detection only if model is available
-            if model is not None:
-                annotated_img, _ = detect_and_annotate(img, confidence_threshold)
-                return av.VideoFrame.from_ndarray(annotated_img, format="bgr24")
-            else:
-                # Return original frame if model is not available
-                return av.VideoFrame.from_ndarray(img, format="bgr24")
-                
-        except Exception as e:
-            # Log error and return original frame
-            print(f"Error in video callback: {e}")
-            return av.VideoFrame.from_ndarray(img, format="bgr24")
+    # Status indicators
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if model is not None:
+            st.success("✅ Model Ready")
+        else:
+            st.error("❌ Model Not Loaded")
     
-    # Only create webrtc_streamer if model is loaded
+    with col2:
+        st.info(f"🎯 Confidence: {confidence_threshold}")
+    
+    with col3:
+        frame_count = st.session_state.get('frame_count', 0)
+        st.metric("Frames Processed", frame_count)
+    
+    # WebRTC Streamer with improved error handling
     if model is not None:
-        webrtc_ctx = webrtc_streamer(
-            key="clothing-defect-detection",
-            mode=WebRtcMode.SENDRECV,
-            # Use the new parameter names instead of deprecated rtc_configuration
-            frontend_rtc_configuration=RTC_CONFIGURATION,
-            server_rtc_configuration=RTC_CONFIGURATION,
-            video_frame_callback=video_frame_callback,
-            media_stream_constraints={"video": True, "audio": False},
-            async_processing=True,
-        )
+        try:
+            # Create video processor
+            video_processor = SafeVideoProcessor(model, confidence_threshold)
+            
+            # Create WebRTC streamer with unique key
+            webrtc_ctx = webrtc_streamer(
+                key=st.session_state.webrtc_key,
+                mode=WebRtcMode.SENDRECV,
+                rtc_configuration=RTC_CONFIGURATION,
+                video_frame_callback=video_processor,
+                media_stream_constraints={
+                    "video": {
+                        "width": {"min": 640, "ideal": 1280, "max": 1920},
+                        "height": {"min": 480, "ideal": 720, "max": 1080},
+                        "frameRate": {"min": 15, "ideal": 30, "max": 30}
+                    }, 
+                    "audio": False
+                },
+                async_processing=True,
+            )
+            
+            # Track connection for cleanup
+            if webrtc_ctx:
+                _webrtc_connections.add(webrtc_ctx)
+                
+                # Update session state
+                st.session_state.webrtc_active = webrtc_ctx.state.playing
+                if hasattr(video_processor, 'frame_count'):
+                    st.session_state.frame_count = video_processor.frame_count
+                
+                # Status display
+                if webrtc_ctx.state.playing:
+                    st.success("🔴 **LIVE** - Detection Active")
+                    
+                    # Real-time stats
+                    if hasattr(video_processor, 'error_count') and video_processor.error_count > 0:
+                        st.warning(f"⚠️ Processing errors: {video_processor.error_count}")
+                else:
+                    st.info("⚪ Click **START** to begin detection")
+            
+        except Exception as e:
+            st.error(f"❌ WebRTC Error: {str(e)}")
+            st.info("💡 Try refreshing the page if the error persists")
+            
+            # Reset session state on error
+            st.session_state.webrtc_active = False
+            
+            # Provide manual reset button
+            if st.button("🔄 Reset WebRTC"):
+                # Generate new key to force recreation
+                import time
+                st.session_state.webrtc_key = f"clothing-defect-detection-{int(time.time())}"
+                st.experimental_rerun()
     else:
-        st.error("Cannot start webcam: Model not loaded")
+        st.error("❌ Cannot start webcam: Model not loaded")
+        st.info("Please check your model configuration in the sidebar")
+    
+    # Emergency controls
+    st.markdown("---")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("🛑 Emergency Stop"):
+            try:
+                safe_cleanup_webrtc()
+                st.session_state.webrtc_active = False
+                st.success("✅ WebRTC stopped successfully")
+                time.sleep(1)
+                st.experimental_rerun()
+            except Exception as e:
+                st.error(f"Error during emergency stop: {e}")
+    
+    with col2:
+        if st.button("🔄 Restart WebRTC"):
+            try:
+                safe_cleanup_webrtc()
+                # Generate new key
+                import time
+                st.session_state.webrtc_key = f"clothing-defect-detection-{int(time.time())}"
+                st.session_state.webrtc_active = False
+                st.success("✅ WebRTC restarted")
+                time.sleep(1)
+                st.experimental_rerun()
+            except Exception as e:
+                st.error(f"Error during restart: {e}")
 
 # Footer
 st.markdown("---")
