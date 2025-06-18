@@ -58,11 +58,34 @@ def detect_and_annotate(image, confidence_threshold=0.5):
         return image, None
         
     try:
-        # Run inference
-        results = model.infer(image, confidence=confidence_threshold)[0]
+        # Debug: Print image info
+        print(f"Image shape: {image.shape}")
+        print(f"Image dtype: {image.dtype}")
+        
+        # Run inference with lower confidence to catch more detections
+        results = model.infer(image, confidence=max(0.01, confidence_threshold - 0.2))[0]
+        
+        # Debug: Print raw results
+        print(f"Raw results type: {type(results)}")
+        if hasattr(results, 'predictions'):
+            print(f"Number of predictions: {len(results.predictions) if results.predictions else 0}")
+            if results.predictions:
+                for i, pred in enumerate(results.predictions):
+                    print(f"Prediction {i}: {pred}")
         
         # Convert to supervision detections
         detections = sv.Detections.from_inference(results)
+        
+        # Debug: Print detections info
+        print(f"Number of detections: {len(detections)}")
+        if len(detections) > 0:
+            print(f"Detection confidences: {detections.confidence}")
+            print(f"Detection classes: {detections.class_id}")
+        
+        # Filter detections by user-specified confidence threshold
+        if len(detections) > 0:
+            mask = detections.confidence >= confidence_threshold
+            detections = detections[mask]
         
         # Create annotators
         box_annotator = sv.BoxAnnotator()
@@ -74,7 +97,13 @@ def detect_and_annotate(image, confidence_threshold=0.5):
             for i, (confidence, class_id) in enumerate(zip(detections.confidence, detections.class_id)):
                 # Get class name if available, otherwise use class_id
                 if hasattr(results, 'predictions') and results.predictions:
-                    class_name = results.predictions[i].class_name if hasattr(results.predictions[i], 'class_name') else f'Class_{class_id}'
+                    # Find the corresponding prediction for this detection
+                    class_name = f'Class_{class_id}'
+                    for pred in results.predictions:
+                        if hasattr(pred, 'class_id') and pred.class_id == class_id:
+                            if hasattr(pred, 'class_name') or hasattr(pred, 'class'):
+                                class_name = getattr(pred, 'class_name', getattr(pred, 'class', f'Class_{class_id}'))
+                                break
                 else:
                     class_name = f'Class_{class_id}'
                 
@@ -86,16 +115,19 @@ def detect_and_annotate(image, confidence_threshold=0.5):
         annotated_image = box_annotator.annotate(scene=image.copy(), detections=detections)
         
         # Annotate image with custom labels (including confidence)
-        annotated_image = label_annotator.annotate(
-            scene=annotated_image, 
-            detections=detections,
-            labels=labels
-        )
+        if len(detections) > 0:
+            annotated_image = label_annotator.annotate(
+                scene=annotated_image, 
+                detections=detections,
+                labels=labels
+            )
         
         return annotated_image, detections
         
     except Exception as e:
         st.error(f"Error during detection: {str(e)}")
+        import traceback
+        st.error(f"Traceback: {traceback.format_exc()}")
         return image, None
 
 # Sidebar
@@ -103,12 +135,31 @@ with st.sidebar:
     st.header("⚙️ Settings")
     confidence_threshold = st.slider(
         "Confidence Threshold", 
-        min_value=0.1, 
+        min_value=0.01, 
         max_value=1.0, 
-        value=0.5, 
-        step=0.1,
-        help="Minimum confidence score for detections"
+        value=0.25, 
+        step=0.01,
+        help="Minimum confidence score for detections. Try lowering this if no detections appear."
     )
+    
+    # Debug options
+    st.markdown("### 🔧 Debug Options")
+    show_debug = st.checkbox("Show Debug Information", value=False)
+    
+    # Model troubleshooting
+    st.markdown("### 🩺 Troubleshoot")
+    if st.button("Test Model"):
+        if model:
+            try:
+                # Create a test image
+                test_img = np.ones((640, 640, 3), dtype=np.uint8) * 128
+                test_results = model.infer(test_img, confidence=0.01)[0]
+                st.success("✅ Model is working")
+                st.info(f"Test result type: {type(test_results)}")
+            except Exception as e:
+                st.error(f"❌ Model test failed: {e}")
+        else:
+            st.error("❌ Model not loaded")
     
     st.markdown("---")
     st.markdown("### 📋 Model Info")
@@ -163,6 +214,12 @@ with tab1:
                         annotated_image, detections = detect_and_annotate(image, confidence_threshold)
                         annotated_image_rgb = cv2.cvtColor(annotated_image, cv2.COLOR_BGR2RGB)
                         st.image(annotated_image_rgb, caption="Detection Result", use_container_width=True)
+                        
+                        # Show debug info if enabled
+                        if show_debug:
+                            st.markdown("**Debug Information:**")
+                            st.text(f"Image shape: {image.shape}")
+                            st.text(f"Confidence threshold: {confidence_threshold}")
                 
                 # Show detection results
                 if detections is not None and len(detections) > 0:
@@ -173,11 +230,14 @@ with tab1:
                     for i, (bbox, confidence, class_id) in enumerate(zip(detections.xyxy, detections.confidence, detections.class_id)):
                         # Try to get class name from model results
                         try:
-                            results = model.infer(image, confidence=confidence_threshold)[0]
-                            if hasattr(results, 'predictions') and results.predictions and i < len(results.predictions):
-                                class_name = results.predictions[i].class_name if hasattr(results.predictions[i], 'class_name') else f'Class_{class_id}'
-                            else:
-                                class_name = f'Class_{class_id}'
+                            results = model.infer(image, confidence=0.01)[0]
+                            class_name = f'Class_{class_id}'
+                            if hasattr(results, 'predictions') and results.predictions:
+                                for pred in results.predictions:
+                                    if hasattr(pred, 'class_id') and pred.class_id == class_id:
+                                        if hasattr(pred, 'class_name') or hasattr(pred, 'class'):
+                                            class_name = getattr(pred, 'class_name', getattr(pred, 'class', f'Class_{class_id}'))
+                                            break
                         except:
                             class_name = f'Class_{class_id}'
                         
@@ -191,7 +251,27 @@ with tab1:
                     
                     st.dataframe(results_data, use_container_width=True)
                 else:
-                    st.info("🔍 Tidak ada defect yang terdeteksi pada gambar ini")
+                    st.warning("🔍 Tidak ada defect yang terdeteksi pada gambar ini")
+                    st.info("💡 **Tips untuk meningkatkan deteksi:**")
+                    st.markdown("""
+                    - Coba turunkan **Confidence Threshold** di sidebar (misal ke 0.1 atau 0.05)
+                    - Pastikan model sudah dilatih dengan data yang sesuai
+                    - Periksa apakah gambar memiliki pencahayaan yang baik
+                    - Aktifkan **Debug Information** untuk melihat detail lebih lanjut
+                    """)
+                    
+                    # Suggest trying different confidence levels
+                    st.markdown("**🎯 Coba confidence threshold yang berbeda:**")
+                    col_a, col_b, col_c = st.columns(3)
+                    with col_a:
+                        if st.button("Try 0.1"):
+                            st.session_state.suggested_confidence = 0.1
+                    with col_b:
+                        if st.button("Try 0.05"):
+                            st.session_state.suggested_confidence = 0.05
+                    with col_c:
+                        if st.button("Try 0.01"):
+                            st.session_state.suggested_confidence = 0.01
                     
         except Exception as e:
             st.error(f"Error processing image: {str(e)}")
