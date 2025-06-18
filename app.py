@@ -131,8 +131,8 @@ def detect_and_annotate(image, confidence_threshold=0.5):
                 defect_color = get_defect_color(class_name)
                 colors.append(defect_color)
                 
-                # Create label with class name and confidence percentage
-                label = f"{class_name} {confidence:.1%}"
+                # Create label with class name and confidence score (format: "Class: 0.xx")
+                label = f"{class_name}: {confidence:.2f}"
                 labels.append(label)
         
         # Create custom colored annotators
@@ -147,15 +147,16 @@ def detect_and_annotate(image, confidence_threshold=0.5):
                 # Draw bounding box with custom color
                 cv2.rectangle(annotated_image, (x1, y1), (x2, y2), color, 2)
                 
-                # Prepare label background
-                label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+                # Prepare label background with padding
+                label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
                 label_w, label_h = label_size[0], label_size[1]
                 
-                # Draw label background rectangle
+                # Draw label background rectangle with padding
+                padding = 5
                 cv2.rectangle(
                     annotated_image,
-                    (x1, y1 - label_h - 10),
-                    (x1 + label_w + 10, y1),
+                    (x1, y1 - label_h - padding * 2),
+                    (x1 + label_w + padding * 2, y1),
                     color,
                     -1
                 )
@@ -164,11 +165,12 @@ def detect_and_annotate(image, confidence_threshold=0.5):
                 cv2.putText(
                     annotated_image,
                     label,
-                    (x1 + 5, y1 - 5),
+                    (x1 + padding, y1 - padding),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 0, 0) if color != (0, 0, 0) else (255, 255, 255),  # Black text, white if bg is black
-                    2
+                    0.7,
+                    (255, 255, 255),  # White text for better contrast
+                    2,
+                    cv2.LINE_AA
                 )
         else:
             annotated_image = image.copy()
@@ -316,6 +318,7 @@ with tab1:
                             "Class": class_name,
                             "Color": color_name,
                             "Confidence": f"{confidence:.2%}",
+                            "Confidence Score": f"{confidence:.4f}",
                             "Bounding Box": f"({int(bbox[0])}, {int(bbox[1])}) - ({int(bbox[2])}, {int(bbox[3])})"
                         })
                     
@@ -374,7 +377,7 @@ with tab2:
         - Pastikan pencahayaan cukup
         - Posisikan pakaian dengan jelas di depan kamera
         - Sesuaikan confidence threshold di sidebar jika diperlukan
-        - Label akan menampilkan nama class dan confidence score dengan warna sesuai jenis defect
+        - Label akan menampilkan format "Class: 0.xx" dengan background berwarna sesuai jenis defect
         """)
     
     # WebRTC Streamer with proper error handling
@@ -418,6 +421,6 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center'>
     <p>🔬 Powered by YOLOv11 & Roboflow | 🚀 Built with Streamlit</p>
-    <p><small>🎨 Detection labels now include confidence scores with color-coded defect types</small></p>
+    <p><small>🎨 Detection labels show confidence scores in format "Class: 0.xx" with color-coded defect types</small></p>
 </div>
 """, unsafe_allow_html=True)
