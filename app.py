@@ -24,6 +24,17 @@ if hasattr(torch, '_classes'):
     except:
         pass
 
+# Define defect colors
+DEFECT_COLORS = {
+    'jahitan': (0, 0, 255),      # 🔴 Red
+    'noda': (0, 255, 255),       # 🟡 Yellow
+    'bolong': (255, 0, 0),       # 🔵 Blue
+    'bahan': (0, 255, 0),        # 🟢 Green
+}
+
+# Default color for unknown classes
+DEFAULT_COLOR = (255, 255, 255)  # White
+
 # Page configuration
 st.set_page_config(
     page_title="Clothing Defect Detection",
@@ -48,10 +59,21 @@ def load_model():
 # Load model at the top level
 model = load_model()
 
-# Helper function: Run detection and draw bounding boxes with confidence
+# Helper function: Get color for defect class
+def get_defect_color(class_name):
+    """
+    Get color for specific defect class
+    """
+    class_name_lower = class_name.lower()
+    for defect_type, color in DEFECT_COLORS.items():
+        if defect_type in class_name_lower:
+            return color
+    return DEFAULT_COLOR
+
+# Helper function: Run detection and draw bounding boxes with confidence and colored labels
 def detect_and_annotate(image, confidence_threshold=0.5):
     """
-    Detect objects in image and return annotated image with confidence scores
+    Detect objects in image and return annotated image with confidence scores and colored labels
     """
     # Check if model is loaded
     if model is None:
@@ -87,12 +109,10 @@ def detect_and_annotate(image, confidence_threshold=0.5):
             mask = detections.confidence >= confidence_threshold
             detections = detections[mask]
         
-        # Create annotators
-        box_annotator = sv.BoxAnnotator()
-        label_annotator = sv.LabelAnnotator()
-        
-        # Create custom labels with confidence scores
+        # Prepare colors and labels for each detection
+        colors = []
         labels = []
+        
         if len(detections) > 0:
             for i, (confidence, class_id) in enumerate(zip(detections.confidence, detections.class_id)):
                 # Get class name if available, otherwise use class_id
@@ -107,20 +127,51 @@ def detect_and_annotate(image, confidence_threshold=0.5):
                 else:
                     class_name = f'Class_{class_id}'
                 
+                # Get color for this defect type
+                defect_color = get_defect_color(class_name)
+                colors.append(defect_color)
+                
                 # Create label with class name and confidence percentage
                 label = f"{class_name} {confidence:.1%}"
                 labels.append(label)
         
-        # Annotate image with bounding boxes
-        annotated_image = box_annotator.annotate(scene=image.copy(), detections=detections)
-        
-        # Annotate image with custom labels (including confidence)
+        # Create custom colored annotators
         if len(detections) > 0:
-            annotated_image = label_annotator.annotate(
-                scene=annotated_image, 
-                detections=detections,
-                labels=labels
-            )
+            # Create annotated image
+            annotated_image = image.copy()
+            
+            # Draw bounding boxes and labels with custom colors
+            for i, (bbox, label, color) in enumerate(zip(detections.xyxy, labels, colors)):
+                x1, y1, x2, y2 = map(int, bbox)
+                
+                # Draw bounding box with custom color
+                cv2.rectangle(annotated_image, (x1, y1), (x2, y2), color, 2)
+                
+                # Prepare label background
+                label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+                label_w, label_h = label_size[0], label_size[1]
+                
+                # Draw label background rectangle
+                cv2.rectangle(
+                    annotated_image,
+                    (x1, y1 - label_h - 10),
+                    (x1 + label_w + 10, y1),
+                    color,
+                    -1
+                )
+                
+                # Draw label text
+                cv2.putText(
+                    annotated_image,
+                    label,
+                    (x1 + 5, y1 - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 0, 0) if color != (0, 0, 0) else (255, 255, 255),  # Black text, white if bg is black
+                    2
+                )
+        else:
+            annotated_image = image.copy()
         
         return annotated_image, detections
         
@@ -141,6 +192,17 @@ with st.sidebar:
         step=0.01,
         help="Minimum confidence score for detections. Try lowering this if no detections appear."
     )
+    
+    # Color legend
+    st.markdown("### 🎨 Defect Color Legend")
+    for defect_type, color in DEFECT_COLORS.items():
+        # Convert BGR to hex for display
+        hex_color = f"#{color[2]:02x}{color[1]:02x}{color[0]:02x}"
+        st.markdown(f"<div style='display: flex; align-items: center;'>"
+                   f"<div style='width: 20px; height: 20px; background-color: {hex_color}; "
+                   f"border: 1px solid #ccc; margin-right: 10px;'></div>"
+                   f"<span style='text-transform: capitalize;'>{defect_type}</span></div>", 
+                   unsafe_allow_html=True)
     
     # Debug options
     st.markdown("### 🔧 Debug Options")
@@ -171,7 +233,7 @@ with st.sidebar:
 
 # Main UI
 st.title("👕 Clothing Defect Detection")
-st.markdown("**Deteksi cacat pada pakaian menggunakan YOLOv11**")
+st.markdown("**Deteksi cacat pada pakaian menggunakan YOLOv11 dengan label berwarna**")
 
 if model is None:
     st.error("Model tidak dapat dimuat. Silakan periksa konfigurasi model Anda.")
@@ -213,7 +275,7 @@ with tab1:
                     with st.spinner("Melakukan deteksi..."):
                         annotated_image, detections = detect_and_annotate(image, confidence_threshold)
                         annotated_image_rgb = cv2.cvtColor(annotated_image, cv2.COLOR_BGR2RGB)
-                        st.image(annotated_image_rgb, caption="Detection Result", use_container_width=True)
+                        st.image(annotated_image_rgb, caption="Detection Result with Colored Labels", use_container_width=True)
                         
                         # Show debug info if enabled
                         if show_debug:
@@ -241,9 +303,18 @@ with tab1:
                         except:
                             class_name = f'Class_{class_id}'
                         
+                        # Get color info
+                        defect_color = get_defect_color(class_name)
+                        color_name = "Unknown"
+                        for defect_type, color in DEFECT_COLORS.items():
+                            if color == defect_color:
+                                color_name = defect_type.title()
+                                break
+                        
                         results_data.append({
                             "Detection #": i+1,
                             "Class": class_name,
+                            "Color": color_name,
                             "Confidence": f"{confidence:.2%}",
                             "Confidence Score": f"{confidence:.4f}",
                             "Bounding Box": f"({int(bbox[0])}, {int(bbox[1])}) - ({int(bbox[2])}, {int(bbox[3])})"
@@ -279,7 +350,7 @@ with tab1:
 # Tab 2: Live Webcam
 with tab2:
     st.header("Live Webcam Detection")
-    st.markdown("**Real-time detection menggunakan webcam**")
+    st.markdown("**Real-time detection menggunakan webcam dengan label berwarna**")
     
     # WebRTC Configuration - Fixed deprecated parameter
     RTC_CONFIGURATION = RTCConfiguration({
@@ -291,14 +362,20 @@ with tab2:
         st.markdown("""
         1. Klik tombol **"START"** untuk memulai webcam
         2. Arahkan kamera ke pakaian yang ingin dideteksi
-        3. Model akan mendeteksi defect secara real-time dengan confidence score
+        3. Model akan mendeteksi defect secara real-time dengan confidence score dan warna label
         4. Klik **"STOP"** untuk menghentikan webcam
+        
+        **Color Legend:**
+        - 🔴 **Jahitan** - Red
+        - 🟡 **Noda** - Yellow  
+        - 🔵 **Bolong** - Blue
+        - 🟢 **Bahan** - Green
         
         **Tips:**
         - Pastikan pencahayaan cukup
         - Posisikan pakaian dengan jelas di depan kamera
         - Sesuaikan confidence threshold di sidebar jika diperlukan
-        - Label akan menampilkan nama class dan confidence score (contoh: "Defect 85.3%")
+        - Label akan menampilkan nama class dan confidence score dengan warna sesuai jenis defect
         """)
     
     # WebRTC Streamer with proper error handling
@@ -342,6 +419,6 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center'>
     <p>🔬 Powered by YOLOv11 & Roboflow | 🚀 Built with Streamlit</p>
-    <p><small>📊 Detection labels now include confidence scores for better analysis</small></p>
+    <p><small>🎨 Detection labels now include confidence scores with color-coded defect types</small></p>
 </div>
 """, unsafe_allow_html=True)
