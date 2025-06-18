@@ -316,7 +316,6 @@ with tab1:
                             "Class": class_name,
                             "Color": color_name,
                             "Confidence": f"{confidence:.2%}",
-                            "Confidence Score": f"{confidence:.4f}",
                             "Bounding Box": f"({int(bbox[0])}, {int(bbox[1])}) - ({int(bbox[2])}, {int(bbox[3])})"
                         })
                     
