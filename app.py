@@ -48,10 +48,10 @@ def load_model():
 # Load model at the top level
 model = load_model()
 
-# Helper function: Run detection and draw bounding boxes
+# Helper function: Run detection and draw bounding boxes with confidence
 def detect_and_annotate(image, confidence_threshold=0.5):
     """
-    Detect objects in image and return annotated image
+    Detect objects in image and return annotated image with confidence scores
     """
     # Check if model is loaded
     if model is None:
@@ -64,13 +64,33 @@ def detect_and_annotate(image, confidence_threshold=0.5):
         # Convert to supervision detections
         detections = sv.Detections.from_inference(results)
         
-        # Create annotators - using basic parameters for compatibility
+        # Create annotators
         box_annotator = sv.BoxAnnotator()
         label_annotator = sv.LabelAnnotator()
         
-        # Annotate image
+        # Create custom labels with confidence scores
+        labels = []
+        if len(detections) > 0:
+            for i, (confidence, class_id) in enumerate(zip(detections.confidence, detections.class_id)):
+                # Get class name if available, otherwise use class_id
+                if hasattr(results, 'predictions') and results.predictions:
+                    class_name = results.predictions[i].class_name if hasattr(results.predictions[i], 'class_name') else f'Class_{class_id}'
+                else:
+                    class_name = f'Class_{class_id}'
+                
+                # Create label with class name and confidence percentage
+                label = f"{class_name} {confidence:.1%}"
+                labels.append(label)
+        
+        # Annotate image with bounding boxes
         annotated_image = box_annotator.annotate(scene=image.copy(), detections=detections)
-        annotated_image = label_annotator.annotate(scene=annotated_image, detections=detections)
+        
+        # Annotate image with custom labels (including confidence)
+        annotated_image = label_annotator.annotate(
+            scene=annotated_image, 
+            detections=detections,
+            labels=labels
+        )
         
         return annotated_image, detections
         
@@ -148,13 +168,24 @@ with tab1:
                 if detections is not None and len(detections) > 0:
                     st.success(f"🔍 Ditemukan {len(detections)} deteksi")
                     
-                    # Create results dataframe
+                    # Create results dataframe with enhanced information
                     results_data = []
                     for i, (bbox, confidence, class_id) in enumerate(zip(detections.xyxy, detections.confidence, detections.class_id)):
+                        # Try to get class name from model results
+                        try:
+                            results = model.infer(image, confidence=confidence_threshold)[0]
+                            if hasattr(results, 'predictions') and results.predictions and i < len(results.predictions):
+                                class_name = results.predictions[i].class_name if hasattr(results.predictions[i], 'class_name') else f'Class_{class_id}'
+                            else:
+                                class_name = f'Class_{class_id}'
+                        except:
+                            class_name = f'Class_{class_id}'
+                        
                         results_data.append({
                             "Detection #": i+1,
-                            "Class": detections.data.get('class_name', [f'Class_{class_id}'])[i] if 'class_name' in detections.data else f'Class_{class_id}',
+                            "Class": class_name,
                             "Confidence": f"{confidence:.2%}",
+                            "Confidence Score": f"{confidence:.4f}",
                             "Bounding Box": f"({int(bbox[0])}, {int(bbox[1])}) - ({int(bbox[2])}, {int(bbox[3])})"
                         })
                     
@@ -180,13 +211,14 @@ with tab2:
         st.markdown("""
         1. Klik tombol **"START"** untuk memulai webcam
         2. Arahkan kamera ke pakaian yang ingin dideteksi
-        3. Model akan mendeteksi defect secara real-time
+        3. Model akan mendeteksi defect secara real-time dengan confidence score
         4. Klik **"STOP"** untuk menghentikan webcam
         
         **Tips:**
         - Pastikan pencahayaan cukup
         - Posisikan pakaian dengan jelas di depan kamera
         - Sesuaikan confidence threshold di sidebar jika diperlukan
+        - Label akan menampilkan nama class dan confidence score (contoh: "Defect 85.3%")
         """)
     
     # WebRTC Streamer with proper error handling
@@ -219,6 +251,9 @@ with tab2:
             media_stream_constraints={"video": True, "audio": False},
             async_processing=True,
         )
+        
+        # Display current confidence threshold for webcam
+        st.info(f"🎯 Current confidence threshold: {confidence_threshold:.1%}")
     else:
         st.error("Cannot start webcam: Model not loaded")
 
@@ -227,5 +262,6 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center'>
     <p>🔬 Powered by YOLOv11 & Roboflow | 🚀 Built with Streamlit</p>
+    <p><small>📊 Detection labels now include confidence scores for better analysis</small></p>
 </div>
 """, unsafe_allow_html=True)
