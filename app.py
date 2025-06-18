@@ -147,28 +147,17 @@ def detect_and_annotate(image, confidence_threshold=0.5):
                 # Draw bounding box with custom color
                 cv2.rectangle(annotated_image, (x1, y1), (x2, y2), color, 2)
                 
-                # Prepare label background with padding
-                label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
-                label_w, label_h = label_size[0], label_size[1]
+                # Draw label text with same color as bounding box (no background)
+                # Position text slightly above the bounding box
+                text_y = y1 - 10 if y1 - 10 > 10 else y1 + 25
                 
-                # Draw label background rectangle with padding
-                padding = 5
-                cv2.rectangle(
-                    annotated_image,
-                    (x1, y1 - label_h - padding * 2),
-                    (x1 + label_w + padding * 2, y1),
-                    color,
-                    -1
-                )
-                
-                # Draw label text
                 cv2.putText(
                     annotated_image,
                     label,
-                    (x1 + padding, y1 - padding),
+                    (x1, text_y),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.7,
-                    (255, 255, 255),  # White text for better contrast
+                    color,  # Use the same color as the bounding box
                     2,
                     cv2.LINE_AA
                 )
@@ -377,7 +366,7 @@ with tab2:
         - Pastikan pencahayaan cukup
         - Posisikan pakaian dengan jelas di depan kamera
         - Sesuaikan confidence threshold di sidebar jika diperlukan
-        - Label akan menampilkan format "Class: 0.xx" dengan background berwarna sesuai jenis defect
+        - Label akan menampilkan format "Class: 0.xx" dengan warna sesuai jenis defect (tanpa background)
         """)
     
     # WebRTC Streamer with proper error handling
@@ -421,6 +410,6 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center'>
     <p>🔬 Powered by YOLOv11 & Roboflow | 🚀 Built with Streamlit</p>
-    <p><small>🎨 Detection labels show confidence scores in format "Class: 0.xx" with color-coded defect types</small></p>
+    <p><small>🎨 Detection labels show confidence scores with color-coded defect types (no background)</small></p>
 </div>
 """, unsafe_allow_html=True)
